@@ -3,7 +3,9 @@
 // ============================================================
 
 const VENDOR_ID = 0x1532;
-const PRODUCT_ID = 0x00A7;
+const PRODUCT_IDS = new Set([0x00A7, 0x00A8]); // A7 = wireless/dongle, A8 = wired
+const MOUSE_USAGE_PAGE = 0x01;
+const MOUSE_USAGE = 0x02;
 const VARSTORE = 0x01;
 
 let mouseDevice = null;
@@ -130,27 +132,108 @@ function buildRazerReport(commandClass, commandId, dataSize, args = []) {
 // Connection
 // ============================================================
 
-async function connectToDevice(devices) {
-    if (devices.length === 0) throw new Error("No devices found.");
+let usingNativeBridge = false;
 
-    let success = false;
-    for (const dev of devices) {
-        try {
-            if (!dev.opened) await dev.open();
-            const testReport = buildRazerReport(0x00, 0x85, 0x01, [0x00]);
-            await dev.sendFeatureReport(0x00, testReport);
-            mouseDevice = dev;
-            success = true;
-            break;
-        } catch (e) {
-            console.log(`Skipping interface (threw ${e.name})`);
-            if (dev.opened) await dev.close();
-        }
+function assertWebHidAvailable() {
+    if (window.location.protocol === 'file:') {
+        throw new Error('Open WebSynapse through http://localhost:8000. The local server starts the Windows HID bridge required for this mouse.');
+    }
+    if (!window.isSecureContext) {
+        throw new Error('WebHID requires a secure page. Open WebSynapse through HTTPS or a local web server, not directly as a file.');
+    }
+    if (!navigator.hid) {
+        throw new Error('This browser does not support WebHID. Use Chrome or Edge.');
+    }
+}
+
+function isRazerCommandInterface(device) {
+    const collections = Array.isArray(device.collections) ? device.collections : [];
+    const isMouseCollection = collections.some(collection =>
+        Number(collection.usagePage) === MOUSE_USAGE_PAGE &&
+        Number(collection.usage) === MOUSE_USAGE
+    );
+    const exposesFeatureReport = collections.some(collectionHasFeatureReport);
+    return isMouseCollection || exposesFeatureReport;
+}
+
+function collectionHasFeatureReport(collection) {
+    return (Array.isArray(collection.featureReports) && collection.featureReports.length > 0) ||
+        (Array.isArray(collection.children) && collection.children.some(collectionHasFeatureReport));
+}
+
+function bytesToBase64(bytes) {
+    let binary = '';
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary);
+}
+
+function base64ToBytes(value) {
+    const binary = atob(value);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+    return bytes;
+}
+
+async function nativeBridgeRequest(path, body) {
+    let response;
+    try {
+        response = await fetch(path, body === undefined ? undefined : {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+    } catch {
+        const error = new Error('The local Windows HID bridge could not be reached. Run node server.js and open http://localhost:8000.');
+        error.nativeBridgeUnavailable = true;
+        throw error;
     }
 
-    if (!success) throw new Error("All interfaces blocked. Ensure Synapse is closed.");
+    const result = await response.json().catch(() => null);
+    if (response.status === 404 || response.status === 405) {
+        const error = new Error('This page is not being served by the WebSynapse Windows bridge. Run node server.js and open http://localhost:8000.');
+        error.nativeBridgeUnavailable = true;
+        throw error;
+    }
+    if (!response.ok && !result) {
+        throw new Error(`The local Windows HID bridge returned HTTP ${response.status}.`);
+    }
+    return result || { ok: false, error: 'The local Windows HID bridge returned no data.' };
+}
 
-    statusText.innerText = `Connected to ${mouseDevice.productName}`;
+function createNativeDevice(device) {
+    const nativeDevice = {
+        productName: device?.ProductName || 'Razer Naga V2 Pro',
+        opened: true,
+        async sendFeatureReport(reportId, data) {
+            if (reportId !== 0) throw new Error('The Naga command interface only accepts feature report 0.');
+            const result = await nativeBridgeRequest('/api/hid/set', {
+                report: bytesToBase64(new Uint8Array(data))
+            });
+            if (!result.ok) throw new Error(result.error || 'Windows rejected the Razer feature report.');
+        },
+        async receiveFeatureReport(reportId) {
+            if (reportId !== 0) throw new Error('The Naga command interface only returns feature report 0.');
+            const result = await nativeBridgeRequest('/api/hid/get', {});
+            if (!result.ok) throw new Error(result.error || 'Windows could not read the Razer feature report.');
+            return new DataView(base64ToBytes(result.data).buffer);
+        },
+        async close() {
+            const result = await nativeBridgeRequest('/api/hid/disconnect', {});
+            if (!result.ok) throw new Error(result.error || 'Windows could not close the Razer feature interface.');
+            nativeDevice.opened = false;
+        }
+    };
+    return nativeDevice;
+}
+
+async function closeDevice(device) {
+    if (device && device.opened) {
+        try { await device.close(); } catch (e) { /* already closed */ }
+    }
+}
+
+async function finishConnection(connectionMethod) {
+    statusText.innerText = `Connected to ${mouseDevice.productName} (${connectionMethod})`;
     statusText.className = 'status-connected';
     controlsPanel.style.display = 'flex';
     connectBtn.style.display = 'none';
@@ -162,12 +245,92 @@ async function connectToDevice(devices) {
     startBatteryPolling();
 }
 
+async function tryNativeBridgeConnection() {
+    if (window.location.protocol === 'file:') return false;
+
+    let result;
+    try {
+        result = await nativeBridgeRequest('/api/hid/connect', {});
+    } catch (error) {
+        if (error.nativeBridgeUnavailable) return false;
+        throw error;
+    }
+    if (!result.ok) throw new Error(result.error || 'The local Windows HID bridge could not connect to the mouse.');
+
+    mouseDevice = createNativeDevice(result.device);
+    usingNativeBridge = true;
+    await finishConnection('Windows HID bridge');
+    return true;
+}
+
+async function connectToDevice(devices) {
+    if (devices.length === 0) {
+        throw new Error('No HID device was selected. Choose the Razer Naga V2 Pro in the browser permission dialog.');
+    }
+
+    const supportedDevices = devices.filter(device =>
+        device.vendorId === VENDOR_ID && PRODUCT_IDS.has(device.productId)
+    );
+    if (supportedDevices.length === 0) {
+        throw new Error('No supported Naga V2 Pro HID interface was selected.');
+    }
+
+    const likelyCommandInterfaces = supportedDevices.filter(isRazerCommandInterface);
+    const otherInterfaces = supportedDevices.filter(device => !isRazerCommandInterface(device));
+    const candidates = [...likelyCommandInterfaces, ...otherInterfaces];
+    const errors = [];
+
+    console.log('Razer HID interfaces:', supportedDevices.map((dev, index) => ({
+        index,
+        productId: `0x${dev.productId.toString(16).padStart(4, '0')}`,
+        productName: dev.productName,
+        commandInterface: isRazerCommandInterface(dev),
+        collections: dev.collections
+    })));
+
+    mouseDevice = null;
+    for (const dev of candidates) {
+        try {
+            if (!dev.opened) await dev.open();
+            await dev.sendFeatureReport(0x00, buildRazerReport(0x00, 0x85, 0x01, [0x00]));
+            mouseDevice = dev;
+            break;
+        } catch (e) {
+            errors.push(`${dev.productName || 'Razer interface'}: ${e.name || 'open failed'}`);
+            await closeDevice(dev);
+        }
+    }
+
+    if (!mouseDevice) {
+        if (errors.some(error => error.includes('NotAllowedError'))) {
+            throw new Error('Edge blocked the Razer feature report because the Naga exposes it inside a protected mouse HID collection. Run node server.js and use the Windows HID bridge instead.');
+        }
+        throw new Error(`Unable to write to the Naga V2 Pro command interface (${errors.join(', ')}).`);
+    }
+
+    usingNativeBridge = false;
+    await finishConnection('WebHID');
+}
+
+async function connectWithBestTransport(requestBrowserPermission) {
+    if (await tryNativeBridgeConnection()) return;
+
+    assertWebHidAvailable();
+    let devices;
+    if (requestBrowserPermission) {
+        const selectedDevices = await navigator.hid.requestDevice({ filters: [{ vendorId: VENDOR_ID }] });
+        const permittedDevices = await navigator.hid.getDevices();
+        devices = [...new Set([...selectedDevices, ...permittedDevices])]
+            .filter(device => device.vendorId === VENDOR_ID);
+    } else {
+        devices = await navigator.hid.getDevices();
+    }
+    await connectToDevice(devices);
+}
+
 connectBtn.addEventListener('click', async () => {
     try {
-        const devices = await navigator.hid.requestDevice({
-            filters: [{ vendorId: VENDOR_ID, productId: PRODUCT_ID }]
-        });
-        await connectToDevice(devices);
+        await connectWithBestTransport(true);
     } catch (e) {
         console.error('Connection failed:', e);
         statusText.innerText = 'Connection failed. ' + e.message;
@@ -178,27 +341,27 @@ connectBtn.addEventListener('click', async () => {
 
 reconnectBtn.addEventListener('click', async () => {
     try {
-        const devices = await navigator.hid.getDevices();
-        const razer = devices.filter(d => d.vendorId === VENDOR_ID && d.productId === PRODUCT_ID);
-        await connectToDevice(razer);
+        await connectWithBestTransport(false);
     } catch (e) {
         showToast('Reconnection failed: ' + e.message, true);
     }
 });
 
-// --- HID Disconnect Detection ---
-navigator.hid.addEventListener('disconnect', (event) => {
-    if (mouseDevice && event.device === mouseDevice) {
-        mouseDevice = null;
-        if (window._battInterval) clearInterval(window._battInterval);
-        statusText.innerText = 'Mouse disconnected!';
-        statusText.className = 'status-disconnected';
-        controlsPanel.style.display = 'none';
-        connectBtn.style.display = 'block';
-        reconnectBtn.style.display = 'block';
-        showToast('Mouse disconnected — click Reconnect when ready', true);
-    }
-});
+// --- WebHID Disconnect Detection ---
+if (navigator.hid) {
+    navigator.hid.addEventListener('disconnect', (event) => {
+        if (!usingNativeBridge && mouseDevice && event.device === mouseDevice) {
+            mouseDevice = null;
+            if (window._battInterval) clearInterval(window._battInterval);
+            statusText.innerText = 'Mouse disconnected!';
+            statusText.className = 'status-disconnected';
+            controlsPanel.style.display = 'none';
+            connectBtn.style.display = 'block';
+            reconnectBtn.style.display = 'block';
+            showToast('Mouse disconnected — click Reconnect when ready', true);
+        }
+    });
+}
 
 // ============================================================
 // Auto Battery Polling (every 60s)

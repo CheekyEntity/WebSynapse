@@ -1,83 +1,82 @@
 # WebSynapse
 
-**Driverless, browser-based configuration tool for the Razer Naga V2 Pro.**
+**Driverless configuration tool for the Razer Naga V2 Pro on Windows.**
 
-No Razer Synapse installation required. WebSynapse talks directly to your mouse over [WebHID](https://developer.mozilla.org/en-US/docs/Web/API/WebHID_API) — zero dependencies, zero build steps, just open `index.html` in your browser.
+WebSynapse talks directly to the mouse through a small local Windows HID bridge. Razer Synapse is not required.
 
 **Created by [CheekyEntity](https://github.com/CheekyEntity)**
 
 ## Features
 
 ### Sensor Performance
-- **DPI** — Read and set your current DPI (100–30,000)
-- **DPI Stages** — Configure 5 DPI presets with active stage indicator
+
+- **DPI** — Read and set the current DPI (100–30,000)
+- **DPI Stages** — Configure five DPI presets with an active-stage indicator
 - **Polling Rate** — 125 / 500 / 1000 Hz
 
 ### Power & Battery
-- **Live Battery Level** with auto-refresh every 60 seconds
-- **Charging Status** detection (⚡ icon)
+
+- **Live Battery Level** with automatic refresh every 60 seconds
+- **Charging Status** detection
 - **Low Battery Threshold** — Configure warning percentage
 - **Wireless Idle Time** — Set sleep timeout (1–15 min)
-- **Charge Effect & Color** — Customize LED behavior while charging
+- **Charge Effect & Color** — Customize LED behaviour while charging
 
-### Advanced Lighting (Per-Zone)
+### Advanced Lighting
+
 - **Independent zone control** — Logo LED, Scroll Wheel, or All Zones
 - **Brightness** — 0–100%
 - **Effects** — Off, Static, Breathing, Spectrum Cycling, Reactive, Wave
-- **Full RGB color picker** for color-based effects
+- **RGB colour picker** for colour-based effects
 
-### Quality of Life
-- **Save/Load Profiles** — Default, Gaming, Work presets via localStorage
+### Profiles
+
+- **Save/Load Profiles** — Default, Gaming, and Work presets in local storage
 - **Export/Import JSON** — Share profiles across browsers and machines
-- **Toast Notifications** — Clean animated feedback (no alert popups)
-- **Auto Disconnect Detection** — UI resets with reconnect prompt
-- **Reconnect Button** — Resume without reloading the page
 
-## Requirements
+## Windows setup
 
-- **Browser**: Any Chromium-based browser (Edge, Chrome, Brave, Opera)
-  - Firefox and Safari do **not** support WebHID
-- **Mouse**: Razer Naga V2 Pro (Vendor ID `0x1532`, Product ID `0x00A7`)
-- **Important**: Close Razer Synapse before connecting — it locks the HID interface
+1. Connect the Naga V2 Pro by cable or its wireless receiver.
+2. In this folder, run `node server.js`.
+3. Open [http://localhost:8000](http://localhost:8000) in Edge, Chrome, or another modern browser.
+4. Click **Connect Mouse**. There is no browser device-picker step.
 
-## Getting Started
+The server automatically starts `native-bridge.ps1`, which opens the mouse’s Windows HID feature interface. The page must be opened through the local server—opening `index.html` directly with `file://` cannot use the bridge.
 
-1. Clone this repo or download the ZIP
-2. Open `index.html` in Microsoft Edge or Google Chrome
-3. Click **Connect Mouse**
-4. Authorize your Razer Naga V2 Pro in the browser popup
-5. Done — all your current settings are fetched automatically
+### Why the local bridge is necessary
 
-No server, no install, no build step required.
+The Naga V2 Pro exposes its configuration report inside its standard mouse HID collection. Chromium deliberately protects mouse and keyboard HID collections, so Edge/Chrome WebHID may show the device but block feature-report writes with `NotAllowedError`. The bridge uses the Windows HID API locally and is restricted to the Naga V2 Pro’s wired/wireless product IDs.
 
-## How It Works
+## How it works
 
-WebSynapse constructs 90-byte Razer HID feature reports in JavaScript and sends them via the browser's WebHID API. The protocol was reverse-engineered from the [OpenRazer](https://github.com/openrazer/openrazer) Linux driver.
+WebSynapse constructs 90-byte Razer feature reports in JavaScript. The local bridge adds the Windows report-ID byte, communicates with the Naga through the Windows HID API, and returns the response to the page. The command protocol was reverse-engineered from the [OpenRazer](https://github.com/openrazer/openrazer) Linux driver.
 
 Key implementation details:
-- **Transaction ID**: `0xFF` for standard commands, `0x1F` for extended matrix/lighting (class `0x0F`)
-- **Interface Discovery**: Razer mice expose multiple HID interfaces; Windows blocks the standard mouse ones. WebSynapse brute-forces each interface with a safe GET command to find the unlocked vendor-defined one.
-- **Checksum**: XOR of bytes 2–87, stored at byte 88
 
-## Project Structure
+- **Transaction ID**: `0xFF` for standard commands, `0x1F` for extended matrix/lighting commands
+- **Checksum**: XOR of bytes 2–87, stored at byte 88
+- **Command interface**: The bridge selects the Naga mouse collection with the 91-byte Windows feature report
+
+## Project structure
 
 ```
 WebSynapse/
-├── index.html    # UI layout
-├── styles.css    # Dark Razer-themed styling
-├── app.js        # All WebHID communication and UI logic
-├── README.md     # This file
-└── LICENSE       # MIT License
+├── index.html           # UI layout
+├── styles.css           # Dark Razer-themed styling
+├── app.js               # Razer protocol and UI logic
+├── server.js            # Local server and bridge API
+├── native-bridge.ps1    # Windows HID implementation
+└── README.md            # This file
 ```
 
-## Supported Device
+## Supported device
 
-Currently supports the **Razer Naga V2 Pro** only. The command structure should be similar for other Razer mice — pull requests to add device support are welcome! You'll need the device's USB Product ID and to verify the command mappings against the [OpenRazer driver source](https://github.com/openrazer/openrazer/blob/master/driver/razermouse_driver.c).
+WebSynapse currently supports the **Razer Naga V2 Pro** only (USB vendor ID `0x1532`, product IDs `0x00A7` and `0x00A8`).
 
 ## Credits
 
 - Protocol research based on [OpenRazer](https://github.com/openrazer/openrazer) (GPL-2.0)
-- Built with the [WebHID API](https://wicg.github.io/webhid/)
+- Original browser API approach based on [WebHID](https://wicg.github.io/webhid/)
 
 ## License
 
