@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSynapse - Razer Control</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo">WebSynapse <span class="badge">BETA</span></div>
+            <p>Driverless control for your Razer Naga V2 Pro</p>
+        </header>
+
+        <section class="connect-panel">
+            <h2 id="connection-status">Waiting for device...</h2>
+            <div class="button-group" style="display: flex; gap: 10px; justify-content: center; margin-top: 20px;">
+                <button id="connect-btn" class="primary-btn">Connect Mouse</button>
+                <button id="reconnect-btn" class="primary-btn" style="display: none;">Reconnect Mouse</button>
+            </div>
+            
+            <div id="profile-section" style="display: none; margin-top: 20px;">
+                <div style="display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap;">
+                    <label style="color: var(--text-secondary);">Profile:</label>
+                    <select id="profile-select">
+                        <option value="default">Default</option>
+                        <option value="gaming">Gaming</option>
+                        <option value="work">Work</option>
+                    </select>
+                    <button id="save-profile-btn" class="secondary-btn">Save</button>
+                    <button id="load-profile-btn" class="secondary-btn">Load</button>
+                    <span style="color: var(--border-color);">|</span>
+                    <button id="export-profile-btn" class="secondary-btn">Export JSON</button>
+                    <button id="import-profile-btn" class="secondary-btn">Import JSON</button>
+                    <input type="file" id="import-file-input" accept=".json" style="display: none;">
+                </div>
+            </div>
+        </section>
+
+        <!-- Toast Notifications Container -->
+        <div id="toast-container"></div>
+
+        <section class="controls-panel" id="controls" style="display: none;">
+            
+            <!-- System Controls -->
+            <div class="control-group">
+                <div class="control-header">
+                    <h2>Sensor Performance</h2>
+                </div>
+                <div class="control-body">
+                    <div class="setting-row">
+                        <label>DPI Settings (Current)</label>
+                        <span class="current-val" id="current-dpi">Fetching...</span>
+                        <input type="range" id="dpi-slider" min="100" max="30000" step="50" value="800">
+                        <input type="number" id="dpi-input" min="100" max="30000" step="50" value="800">
+                    </div>
+                    <div class="setting-row" style="flex-direction: column; align-items: flex-start;">
+                        <label style="margin-bottom: 5px;">DPI Stages (1-5) — <span id="active-stage-label" style="color: var(--razer-green);">Active: Stage 1</span></label>
+                        <div class="dpi-stages-row">
+                            <div class="dpi-stage-item">
+                                <span class="stage-badge active-stage" id="stage-badge-1">1</span>
+                                <input type="number" id="dpi-stage-1" min="100" max="30000" step="50" value="400">
+                            </div>
+                            <div class="dpi-stage-item">
+                                <span class="stage-badge" id="stage-badge-2">2</span>
+                                <input type="number" id="dpi-stage-2" min="100" max="30000" step="50" value="800">
+                            </div>
+                            <div class="dpi-stage-item">
+                                <span class="stage-badge" id="stage-badge-3">3</span>
+                                <input type="number" id="dpi-stage-3" min="100" max="30000" step="50" value="1600">
+                            </div>
+                            <div class="dpi-stage-item">
+                                <span class="stage-badge" id="stage-badge-4">4</span>
+                                <input type="number" id="dpi-stage-4" min="100" max="30000" step="50" value="3200">
+                            </div>
+                            <div class="dpi-stage-item">
+                                <span class="stage-badge" id="stage-badge-5">5</span>
+                                <input type="number" id="dpi-stage-5" min="100" max="30000" step="50" value="6400">
+                            </div>
+                        </div>
+                    </div>
+                    <div class="setting-row">
+                        <label>Polling Rate</label>
+                        <span class="current-val" id="current-poll">Fetching...</span>
+                        <select id="poll-rate-select">
+                            <option value="125">125 Hz</option>
+                            <option value="500">500 Hz</option>
+                            <option value="1000" selected>1000 Hz</option>
+                        </select>
+                    </div>
+                    <button id="apply-performance-btn" class="secondary-btn">Apply Performance Settings</button>
+                </div>
+            </div>
+
+            <!-- Power & Battery -->
+            <div class="control-group">
+                <div class="control-header">
+                    <h2>Power & Battery</h2>
+                    <div class="battery-status">
+                        <span id="battery-icon">🔋</span>
+                        <span id="battery-level">Fetching...</span>
+                    </div>
+                </div>
+                <div class="control-body">
+                    <div class="setting-row">
+                        <label>Low Battery Threshold (%)</label>
+                        <span class="current-val" id="current-low-batt">Fetching...</span>
+                        <input type="range" id="low-batt-slider" min="5" max="25" step="1" value="15">
+                        <input type="number" id="low-batt-input" min="5" max="25" step="1" value="15">
+                    </div>
+                    <div class="setting-row">
+                        <label>Wireless Idle Time (Minutes)</label>
+                        <span class="current-val" id="current-idle">Fetching...</span>
+                        <input type="range" id="idle-slider" min="1" max="15" step="1" value="5">
+                        <input type="number" id="idle-input" min="1" max="15" step="1" value="5">
+                    </div>
+                    <div class="setting-row">
+                        <label>Charging LED Effect</label>
+                        <select id="charge-effect-select">
+                            <option value="0">Default (Breathing)</option>
+                            <option value="1">Static Color</option>
+                        </select>
+                    </div>
+                    <div class="setting-row" id="charge-color-row" style="display: none;">
+                        <label>Charging LED Color</label>
+                        <input type="color" id="charge-color-picker" value="#44d62c">
+                    </div>
+                    <button id="apply-power-btn" class="secondary-btn">Apply Power Settings</button>
+                </div>
+            </div>
+
+            <!-- Advanced Lighting -->
+            <div class="control-group">
+                <div class="control-header">
+                    <h2>Advanced Lighting</h2>
+                </div>
+                <div class="control-body">
+                    <div class="setting-row">
+                        <label>Lighting Zone</label>
+                        <select id="light-zone-select">
+                            <option value="all">All Zones</option>
+                            <option value="logo">Logo LED</option>
+                            <option value="scroll">Scroll Wheel</option>
+                        </select>
+                    </div>
+                    <div class="setting-row">
+                        <label>Brightness</label>
+                        <span class="current-val" id="current-bright">Fetching...</span>
+                        <input type="range" id="bright-slider" min="0" max="100" step="1" value="50">
+                        <input type="number" id="bright-input" min="0" max="100" step="1" value="50">
+                    </div>
+                    <div class="setting-row">
+                        <label>Effect</label>
+                        <select id="light-effect-select">
+                            <option value="none">Off</option>
+                            <option value="static">Static</option>
+                            <option value="breathing">Breathing</option>
+                            <option value="spectrum">Spectrum Cycling</option>
+                            <option value="reactive">Reactive</option>
+                            <option value="wave">Wave</option>
+                        </select>
+                    </div>
+                    <div class="setting-row" id="color-picker-row">
+                        <label>Color</label>
+                        <input type="color" id="light-color-picker" value="#44d62c">
+                    </div>
+                    <button id="apply-lighting-btn" class="secondary-btn">Apply Lighting to Zone</button>
+                </div>
+            </div>
+            
+            <button id="refresh-btn" class="outline-btn">Refresh Values from Mouse</button>
+        </section>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
