@@ -2,20 +2,87 @@
 
 **Driverless configuration tool for the Razer Naga V2 Pro on Windows.**
 
-WebSynapse talks directly to the mouse through a small local Windows HID bridge. Razer Synapse is not required.
+WebSynapse talks directly to the mouse through a small local Windows HID bridge — no Razer Synapse install required.
 
 **Created by [CheekyEntity](https://github.com/CheekyEntity)**
+
+> ⚠️ **Unofficial tool.** This is a community project, not made or endorsed by Razer. It runs entirely on your machine (nothing is sent anywhere), and the full source is in this repo if you want to check what it's doing before you run it.
+
+## Quick look
+
+![WebSynapse UI](docs/UI.png)
+
+## Supported device
+
+- **Razer Naga V2 Pro** only
+- USB vendor ID `0x1532`, product IDs `0x00A7` (wireless/dongle) and `0x00A8` (wired)
+
+## Prerequisites
+
+Before you start, make sure you have:
+
+| Requirement | Notes |
+|---|---|
+| **Windows 10 or 11** | The native bridge uses the Windows HID API directly. |
+| **[Node.js](https://nodejs.org/)** (v18 or later recommended) | Runs the local server. Check with `node -v`. |
+| **PowerShell 7+ (`pwsh.exe`)** | The bridge script needs the `pwsh` command specifically — Windows' built-in PowerShell 5.1 (`powershell.exe`) is **not** enough. Install with:<br>`winget install --id Microsoft.PowerShell -e`<br>Then restart your terminal and check with `pwsh -v`. |
+| **Naga V2 Pro connected** | By USB cable, or its wireless dongle. |
+
+## Setup
+
+1. **Download this project.**
+   Clone it, or download and unzip it from GitHub.
+
+2. **Open a terminal in the project folder.**
+   In File Explorer, open the WebSynapse folder, then right-click → *Open in Terminal* (or `cd` there manually).
+
+3. **Start the server:**
+   ```
+   node server.js
+   ```
+   You should see `WebSynapse is running at http://localhost:8000`.
+
+4. **Open the app.**
+   Go to [http://localhost:8000](http://localhost:8000) in Edge, Chrome, or another Chromium-based browser.
+   > Opening `index.html` directly as a `file://` page will **not** work — it needs to be served by `node server.js` so the HID bridge can run.
+
+5. **Click "Connect Mouse."**
+   No browser device-picker step is needed — the local bridge handles the connection for you.
+
+6. **Stop the server** whenever you're done by pressing `Ctrl+C` in the terminal.
+
+## Troubleshooting
+
+**`Could not start the Windows HID bridge: spawn pwsh.exe ENOENT`**
+PowerShell 7 isn't installed, or isn't on your `PATH`. Install it with `winget install --id Microsoft.PowerShell -e`, restart your terminal, and try again.
+
+**Browser shows a `NotAllowedError` when connecting**
+This is expected on its own — Chromium blocks feature-report writes to protected mouse HID collections. That's exactly why the local Windows bridge exists; make sure `node server.js` is running and you're using `http://localhost:8000`, not opening the HTML file directly.
+
+**"No writable Naga V2 Pro HID feature interface was found"**
+- Confirm the mouse is connected (cable or wireless dongle) and powered on.
+- Check it's recognized in Windows Device Manager.
+- Try unplugging/reconnecting, or restarting the server.
+
+**Port 8000 is already in use**
+Set a different port before starting the server:
+```
+set WEBSYNAPSE_PORT=8080
+node server.js
+```
+Then open `http://localhost:8080` instead.
+
+**Mouse disconnects unexpectedly**
+Click **Reconnect Mouse** — WebSynapse detects disconnects automatically and shows this button.
 
 ## Features
 
 ### Sensor Performance
-
 - **DPI** — Read and set the current DPI (100–30,000)
 - **DPI Stages** — Configure five DPI presets with an active-stage indicator
 - **Polling Rate** — 125 / 500 / 1000 Hz
 
 ### Power & Battery
-
 - **Live Battery Level** with automatic refresh every 60 seconds
 - **Charging Status** detection
 - **Low Battery Threshold** — Configure warning percentage
@@ -23,29 +90,14 @@ WebSynapse talks directly to the mouse through a small local Windows HID bridge.
 - **Charge Effect & Color** — Customize LED behaviour while charging
 
 ### Advanced Lighting
-
 - **Independent zone control** — Logo LED, Scroll Wheel, or All Zones
 - **Brightness** — 0–100%
 - **Effects** — Off, Static, Breathing, Spectrum Cycling, Reactive, Wave
 - **RGB colour picker** for colour-based effects
 
 ### Profiles
-
 - **Save/Load Profiles** — Default, Gaming, and Work presets in local storage
 - **Export/Import JSON** — Share profiles across browsers and machines
-
-## Windows setup
-
-1. Connect the Naga V2 Pro by cable or its wireless receiver.
-2. In this folder, run `node server.js`.
-3. Open [http://localhost:8000](http://localhost:8000) in Edge, Chrome, or another modern browser.
-4. Click **Connect Mouse**. There is no browser device-picker step.
-
-The server automatically starts `native-bridge.ps1`, which opens the mouse’s Windows HID feature interface. The page must be opened through the local server—opening `index.html` directly with `file://` cannot use the bridge.
-
-### Why the local bridge is necessary
-
-The Naga V2 Pro exposes its configuration report inside its standard mouse HID collection. Chromium deliberately protects mouse and keyboard HID collections, so Edge/Chrome WebHID may show the device but block feature-report writes with `NotAllowedError`. The bridge uses the Windows HID API locally and is restricted to the Naga V2 Pro’s wired/wireless product IDs.
 
 ## How it works
 
@@ -61,17 +113,15 @@ Key implementation details:
 
 ```
 WebSynapse/
-├── index.html           # UI layout
-├── styles.css           # Dark Razer-themed styling
-├── app.js               # Razer protocol and UI logic
-├── server.js            # Local server and bridge API
-├── native-bridge.ps1    # Windows HID implementation
-└── README.md            # This file
+├── docs/
+│   └── UI.png             # Screenshot used in this README
+├── index.html             # UI layout
+├── styles.css              # Dark Razer-themed styling
+├── app.js                  # Razer protocol and UI logic
+├── server.js               # Local server and bridge API
+├── native-bridge.ps1       # Windows HID implementation
+└── README.md               # This file
 ```
-
-## Supported device
-
-WebSynapse currently supports the **Razer Naga V2 Pro** only (USB vendor ID `0x1532`, product IDs `0x00A7` and `0x00A8`).
 
 ## Credits
 
