@@ -15,7 +15,7 @@ WebSynapse talks directly to the mouse through a small local Windows HID bridge 
 ## Supported device
 
 - **Razer Naga V2 Pro** only
-- USB vendor ID `0x1532`, product IDs `0x00A7` (wireless/dongle) and `0x00A8` (wired)
+- USB vendor ID `0x1532`, product IDs `0x00A7` (wired) and `0x00A8` (wireless/HyperSpeed receiver)
 
 ## Prerequisites
 
@@ -79,24 +79,25 @@ Click **Reconnect Mouse** — WebSynapse detects disconnects automatically and s
 
 ### Sensor Performance
 - **DPI** — Read and set the current DPI (100–30,000)
-- **DPI Stages** — Configure five DPI presets with an active-stage indicator
+- **DPI Stages** — Configure five DPI presets; click a stage's badge to choose which one is active
 - **Polling Rate** — 125 / 500 / 1000 Hz
+- **Firmware Version** — Shown next to the connection status once connected
 
 ### Power & Battery
 - **Live Battery Level** with automatic refresh every 60 seconds
 - **Charging Status** detection
 - **Low Battery Threshold** — Configure warning percentage
 - **Wireless Idle Time** — Set sleep timeout (1–15 min)
-- **Charge Effect & Color** — Customize LED behaviour while charging
+- **Charge Effect & Color** — Customize LED behaviour while charging (wireless connection only — hidden over a wired connection, since the mouse doesn't support it)
 
 ### Advanced Lighting
-- **Independent zone control** — Logo LED, Scroll Wheel, or All Zones
+- **Independent zone control** — Logo LED, Main/Thumbgrid, or All Zones
 - **Brightness** — 0–100%
 - **Effects** — Off, Static, Breathing, Spectrum Cycling, Reactive, Wave
 - **RGB colour picker** for colour-based effects
 
 ### Profiles
-- **Save/Load Profiles** — Default, Gaming, and Work presets in local storage
+- **Save/Load Profiles** — Default, Gaming, and Work presets, saved in this browser only (not on the mouse)
 - **Export/Import JSON** — Share profiles across browsers and machines
 
 ## How it works
@@ -105,9 +106,12 @@ WebSynapse constructs 90-byte Razer feature reports in JavaScript. The local bri
 
 Key implementation details:
 
-- **Transaction ID**: `0xFF` for standard commands, `0x1F` for extended matrix/lighting commands
+- **Transaction ID**: `0x1F` for essentially every command this device accepts — checked against OpenRazer's reference driver across DPI, polling rate, battery, charging, idle time, and lighting
+- **Response validation**: every command is sent and then read back, checking the device's status byte (success/busy/failure/timeout/not-supported) and that the response actually echoes the command class/id that was sent, instead of assuming a write succeeded
+- **Charging LED controls**: only available on the wireless connection, matching the reference driver (the wired variant doesn't support them)
 - **Checksum**: XOR of bytes 2–87, stored at byte 88
-- **Command interface**: The bridge selects the Naga mouse collection with the 91-byte Windows feature report
+- **Command interface**: The bridge selects the Naga mouse collection with the 91-byte Windows feature report, after confirming it with a live protocol probe (not just matching HID descriptor metadata)
+- **Session token**: the server generates a random token on startup and injects it into the page; every request to the local HID bridge must carry it, so another tab or website on your machine can't silently drive the mouse by hitting `localhost:8000` directly
 
 ## Project structure
 

@@ -379,6 +379,12 @@ button {
     color: var(--text-secondary);
     border: 2px solid var(--border-color);
     transition: var(--transition);
+    /* Fix (issue 1.3): badges are now clickable to choose the active stage. */
+    cursor: pointer;
+}
+
+.stage-badge:hover {
+    border-color: var(--razer-green);
 }
 .stage-badge.active-stage {
     background: var(--razer-green);

@@ -3,11 +3,22 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { spawn } = require('child_process');
 
 const root = path.resolve(__dirname);
 const port = Number(process.env.WEBSYNAPSE_PORT || 8000);
 const bridgeScript = path.join(root, 'native-bridge.ps1');
+
+// Fix (issue 9): binding to 127.0.0.1 keeps remote machines out, but it does
+// nothing to stop another tab or any other local webpage from fetch()-ing
+// these endpoints directly ("drive-by localhost" access) — there was no
+// per-process auth token. Generate one at startup and require it on every
+// /api/hid/* request; it's injected into index.html on page load (see
+// handleStatic below) so the real page always has it, but a page on a
+// different origin has no way to read it.
+const authToken = crypto.randomBytes(24).toString('hex');
+const AUTH_HEADER = 'x-websynapse-token';
 const contentTypes = {
     '.css': 'text/css; charset=utf-8',
     '.html': 'text/html; charset=utf-8',
@@ -114,8 +125,21 @@ function sendJson(response, status, body) {
     response.end(JSON.stringify(body));
 }
 
+// Fix (issue 9): readJson previously accepted any request body regardless
+// of Content-Type. Now requires application/json for anything with a body,
+// which at least stops a plain HTML <form> POST (which browsers will send
+// without preflight) from reaching this parser with attacker-controlled
+// non-JSON content.
 function readJson(request) {
     return new Promise((resolve, reject) => {
+        const contentType = request.headers['content-type'] || '';
+        if (request.method === 'POST' && contentType && !contentType.includes('application/json')) {
+            const error = new Error('Content-Type must be application/json.');
+            error.statusCode = 415;
+            reject(error);
+            return;
+        }
+
         let body = '';
         request.setEncoding('utf8');
         request.on('data', chunk => {
@@ -140,7 +164,46 @@ function readJson(request) {
     });
 }
 
+// Fix (issue 10): previously only checked that `report` was *a string* —
+// zero structural validation of the actual HID payload, i.e. a pure
+// base64-in passthrough straight to HidD_SetFeature. This doesn't turn the
+// endpoint into a real semantic command API (that would mean duplicating
+// the whole Razer protocol server-side, a much larger redesign than a
+// bounded fix), but it does reject anything that isn't even a well-formed
+// Razer report before it reaches the device: wrong length, or a checksum
+// that doesn't match the bytes it's supposed to protect.
+function validateRazerReportBase64(value) {
+    if (typeof value !== 'string') return 'A base64 feature report is required.';
+    let bytes;
+    try {
+        bytes = Buffer.from(value, 'base64');
+    } catch {
+        return 'The report was not valid base64.';
+    }
+    if (bytes.length !== 90) {
+        return `The report must be exactly 90 bytes (got ${bytes.length}).`;
+    }
+    let crc = 0;
+    for (let i = 2; i < 88; i++) crc ^= bytes[i];
+    if (crc !== bytes[88]) {
+        return 'The report\u2019s checksum does not match its contents.';
+    }
+    return null;
+}
+
+// Fix (issue 9): per-request auth check. Requests missing the token, or
+// carrying the wrong one, are rejected before any bridge command runs.
+function isAuthorized(request) {
+    const presented = request.headers[AUTH_HEADER];
+    return typeof presented === 'string' && presented === authToken;
+}
+
 async function handleApi(request, response, pathname) {
+    if (!isAuthorized(request)) {
+        sendJson(response, 403, { ok: false, error: 'Missing or invalid session token.' });
+        return;
+    }
+
     let command;
     let extra = {};
     if (request.method === 'GET' && pathname === '/api/hid/status') command = 'status';
@@ -149,8 +212,9 @@ async function handleApi(request, response, pathname) {
     if (request.method === 'POST' && pathname === '/api/hid/set') {
         command = 'setFeature';
         const body = await readJson(request);
-        if (typeof body.report !== 'string') {
-            sendJson(response, 400, { ok: false, error: 'A base64 feature report is required.' });
+        const validationError = validateRazerReportBase64(body.report);
+        if (validationError) {
+            sendJson(response, 400, { ok: false, error: validationError });
             return;
         }
         extra = { report: body.report };
@@ -187,6 +251,28 @@ function handleStatic(request, response, pathname) {
     if (filePath !== root && !filePath.startsWith(root + path.sep)) {
         response.writeHead(403);
         response.end('Forbidden');
+        return;
+    }
+
+    // Fix (issue 9): index.html gets the session token injected on every
+    // load so app.js can send it back on /api/hid/* requests. Only this one
+    // file is read into memory and rewritten; every other static asset
+    // keeps streaming straight from disk, unchanged.
+    if (relativePath === 'index.html') {
+        fs.readFile(filePath, 'utf8', (readError, html) => {
+            if (readError) {
+                response.writeHead(404);
+                response.end('Not found');
+                return;
+            }
+            const tokenScript = `<script>window.__WEBSYNAPSE_TOKEN__=${JSON.stringify(authToken)};</script>\n</head>`;
+            const injected = html.includes('</head>') ? html.replace('</head>', tokenScript) : html;
+            response.writeHead(200, {
+                'Content-Type': contentTypes['.html'],
+                'Cache-Control': 'no-store'
+            });
+            response.end(request.method === 'HEAD' ? undefined : injected);
+        });
         return;
     }
 

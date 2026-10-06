@@ -15,21 +15,27 @@
 
         <section class="connect-panel">
             <h2 id="connection-status">Waiting for device...</h2>
+            <!-- Fix (item 7): no firmware-version detection existed anywhere. -->
+            <p id="firmware-info" style="margin-top: 6px; font-size: 0.85rem; color: var(--text-secondary);"></p>
             <div class="button-group" style="display: flex; gap: 10px; justify-content: center; margin-top: 20px;">
                 <button id="connect-btn" class="primary-btn">Connect Mouse</button>
                 <button id="reconnect-btn" class="primary-btn" style="display: none;">Reconnect Mouse</button>
             </div>
             
             <div id="profile-section" style="display: none; margin-top: 20px;">
+                <!-- Fix (item 15): these were unlabeled "Save"/"Load" buttons next
+                     to a Profile dropdown, which reads as an onboard hardware
+                     profile switcher. Clarified that it's browser storage only —
+                     nothing is written to the mouse until you press Apply. -->
                 <div style="display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap;">
-                    <label style="color: var(--text-secondary);">Profile:</label>
+                    <label style="color: var(--text-secondary);">Profile (saved in this browser, not on the mouse):</label>
                     <select id="profile-select">
                         <option value="default">Default</option>
                         <option value="gaming">Gaming</option>
                         <option value="work">Work</option>
                     </select>
-                    <button id="save-profile-btn" class="secondary-btn">Save</button>
-                    <button id="load-profile-btn" class="secondary-btn">Load</button>
+                    <button id="save-profile-btn" class="secondary-btn">Save to browser</button>
+                    <button id="load-profile-btn" class="secondary-btn">Load into form</button>
                     <span style="color: var(--border-color);">|</span>
                     <button id="export-profile-btn" class="secondary-btn">Export JSON</button>
                     <button id="import-profile-btn" class="secondary-btn">Import JSON</button>
@@ -56,7 +62,7 @@
                         <input type="number" id="dpi-input" min="100" max="30000" step="50" value="800">
                     </div>
                     <div class="setting-row" style="flex-direction: column; align-items: flex-start;">
-                        <label style="margin-bottom: 5px;">DPI Stages (1-5) — <span id="active-stage-label" style="color: var(--razer-green);">Active: Stage 1</span></label>
+                        <label style="margin-bottom: 5px;">DPI Stages (1-5, click a badge to set it active) — <span id="active-stage-label" style="color: var(--razer-green);">Active: Stage 1</span></label>
                         <div class="dpi-stages-row">
                             <div class="dpi-stage-item">
                                 <span class="stage-badge active-stage" id="stage-badge-1">1</span>
@@ -115,7 +121,11 @@
                         <input type="range" id="idle-slider" min="1" max="15" step="1" value="5">
                         <input type="number" id="idle-input" min="1" max="15" step="1" value="5">
                     </div>
-                    <div class="setting-row">
+                    <!-- Fix (issue 1.11): charge_effect/charge_colour only exist on the
+                         wireless variant in OpenRazer's driver (registered under the
+                         WIRELESS case before falling through to shared wired attrs).
+                         Row gets an id so app.js can hide it on a wired connection. -->
+                    <div class="setting-row" id="charge-effect-row">
                         <label>Charging LED Effect</label>
                         <select id="charge-effect-select">
                             <option value="0">Default (Breathing)</option>
@@ -138,10 +148,15 @@
                 <div class="control-body">
                     <div class="setting-row">
                         <label>Lighting Zone</label>
+                        <!-- Fix (item 3): "Scroll Wheel" previously sent a command
+                             OpenRazer's own driver never registers for this device.
+                             Replaced with "Main / Thumbgrid", which matches the LED
+                             id OpenRazer's matrix_brightness/matrix_effect_* calls
+                             actually use here. -->
                         <select id="light-zone-select">
                             <option value="all">All Zones</option>
                             <option value="logo">Logo LED</option>
-                            <option value="scroll">Scroll Wheel</option>
+                            <option value="main">Main / Thumbgrid</option>
                         </select>
                     </div>
                     <div class="setting-row">
