@@ -10,15 +10,28 @@ const root = path.resolve(__dirname);
 const port = Number(process.env.WEBSYNAPSE_PORT || 8000);
 const bridgeScript = path.join(root, 'native-bridge.ps1');
 
-// Fix (issue 9): binding to 127.0.0.1 keeps remote machines out, but it does
-// nothing to stop another tab or any other local webpage from fetch()-ing
-// these endpoints directly ("drive-by localhost" access) — there was no
-// per-process auth token. Generate one at startup and require it on every
-// /api/hid/* request; it's injected into index.html on page load (see
-// handleStatic below) so the real page always has it, but a page on a
-// different origin has no way to read it.
+// Per-process auth token required on every /api/hid/* request. It is injected
+// into index.html on load (see handleStatic), so the real page has it but a
+// page on a different origin cannot read it.
 const authToken = crypto.randomBytes(24).toString('hex');
 const AUTH_HEADER = 'x-websynapse-token';
+
+// DNS-rebinding defence: only answer requests addressed to our own loopback
+// host:port. A rebinding attack arrives with the attacker's hostname in Host.
+// The server binds to 127.0.0.1 only; add `[::1]:${port}` if that ever changes.
+const allowedHosts = new Set([`localhost:${port}`, `127.0.0.1:${port}`]);
+const allowedOrigins = new Set([`http://localhost:${port}`, `http://127.0.0.1:${port}`]);
+
+function isTrustedRequest(request) {
+    const host = String(request.headers.host || '').toLowerCase();
+    if (!allowedHosts.has(host)) return false;
+    const origin = request.headers.origin;
+    return origin === undefined || allowedOrigins.has(String(origin).toLowerCase());
+}
+
+// A bridge request that gets no answer usually means the bridge is stuck.
+const BRIDGE_TIMEOUT_MS = 10000;
+
 const contentTypes = {
     '.css': 'text/css; charset=utf-8',
     '.html': 'text/html; charset=utf-8',
@@ -75,7 +88,10 @@ function startBridge() {
     bridgeFailure = null;
     bridgeBuffer = '';
 
-    const child = spawn('pwsh.exe', ['-NoProfile', '-File', bridgeScript], {
+    // -ExecutionPolicy Bypass applies to this one pwsh process only (it does not
+    // change the system policy). Without it, a native-bridge.ps1 that Windows
+    // marks as downloaded from the internet is refused as "not digitally signed".
+    const child = spawn('pwsh.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', bridgeScript], {
         cwd: root,
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true
@@ -108,9 +124,20 @@ function sendBridgeCommand(command, extra = {}) {
 
     const id = nextBridgeRequestId++;
     return new Promise((resolve, reject) => {
-        pendingBridgeRequests.set(id, { resolve, reject });
+        const timer = setTimeout(() => {
+            if (!pendingBridgeRequests.delete(id)) return;
+            reject(new Error('The Windows HID bridge did not respond in time.'));
+            stopBridge(); // a silent bridge is stuck; restart it on the next call
+        }, BRIDGE_TIMEOUT_MS);
+
+        pendingBridgeRequests.set(id, {
+            resolve: value => { clearTimeout(timer); resolve(value); },
+            reject: error => { clearTimeout(timer); reject(error); }
+        });
+
         child.stdin.write(`${JSON.stringify({ id, command, ...extra })}\n`, error => {
             if (!error) return;
+            clearTimeout(timer);
             pendingBridgeRequests.delete(id);
             reject(new Error(`Could not send a command to the Windows HID bridge: ${error.message}`));
         });
@@ -125,11 +152,8 @@ function sendJson(response, status, body) {
     response.end(JSON.stringify(body));
 }
 
-// Fix (issue 9): readJson previously accepted any request body regardless
-// of Content-Type. Now requires application/json for anything with a body,
-// which at least stops a plain HTML <form> POST (which browsers will send
-// without preflight) from reaching this parser with attacker-controlled
-// non-JSON content.
+// Requires application/json for anything with a body, which stops a plain
+// HTML <form> POST (sent by browsers without preflight) from reaching the parser.
 function readJson(request) {
     return new Promise((resolve, reject) => {
         const contentType = request.headers['content-type'] || '';
@@ -164,14 +188,8 @@ function readJson(request) {
     });
 }
 
-// Fix (issue 10): previously only checked that `report` was *a string* —
-// zero structural validation of the actual HID payload, i.e. a pure
-// base64-in passthrough straight to HidD_SetFeature. This doesn't turn the
-// endpoint into a real semantic command API (that would mean duplicating
-// the whole Razer protocol server-side, a much larger redesign than a
-// bounded fix), but it does reject anything that isn't even a well-formed
-// Razer report before it reaches the device: wrong length, or a checksum
-// that doesn't match the bytes it's supposed to protect.
+// Rejects anything that isn't even a well-formed Razer report (wrong length or
+// bad checksum) before it reaches the device.
 function validateRazerReportBase64(value) {
     if (typeof value !== 'string') return 'A base64 feature report is required.';
     let bytes;
@@ -191,8 +209,6 @@ function validateRazerReportBase64(value) {
     return null;
 }
 
-// Fix (issue 9): per-request auth check. Requests missing the token, or
-// carrying the wrong one, are rejected before any bridge command runs.
 function isAuthorized(request) {
     const presented = request.headers[AUTH_HEADER];
     return typeof presented === 'string' && presented === authToken;
@@ -254,10 +270,8 @@ function handleStatic(request, response, pathname) {
         return;
     }
 
-    // Fix (issue 9): index.html gets the session token injected on every
-    // load so app.js can send it back on /api/hid/* requests. Only this one
-    // file is read into memory and rewritten; every other static asset
-    // keeps streaming straight from disk, unchanged.
+    // index.html gets the session token injected on every load; every other
+    // static asset streams straight from disk, unchanged.
     if (relativePath === 'index.html') {
         fs.readFile(filePath, 'utf8', (readError, html) => {
             if (readError) {
@@ -292,6 +306,14 @@ function handleStatic(request, response, pathname) {
 }
 
 const server = http.createServer(async (request, response) => {
+    // Applies to ALL requests (static files included): the session token is
+    // served through index.html, so that is where a rebinding attack would leak it.
+    if (!isTrustedRequest(request)) {
+        response.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+        response.end('Forbidden: unexpected Host or Origin.');
+        return;
+    }
+
     let pathname;
     try {
         pathname = decodeURIComponent(new URL(request.url, 'http://localhost').pathname);

@@ -1,4 +1,112 @@
-# WebSynapse Fix Pass — Changelog
+# WebSynapse Changelog
+
+Newest pass first. The second pass fixes problems found in a follow-up review of
+the first pass's code; it is untested on real hardware, like the first.
+
+# Second fix pass
+
+Each item says what was wrong, what changed, and which file(s) it touches.
+
+## Reliability
+
+**A1 — one unanswered bridge request could freeze the whole app.** When a bridge
+command threw inside PowerShell, the error response was sent with `id = $null`, so
+`server.js` never matched it to its pending request. There was no timeout either,
+and because every HID call is chained through one queue, a single hung request
+blocked all later ones until the page was reloaded. Now the error response carries
+the request's id, and every bridge request has a 10-second timeout that rejects the
+request and restarts the bridge process. A request whose JSON can't even be parsed
+has no id to echo, which is what the timeout covers. *(native-bridge.ps1,
+server.js)*
+
+**A2 — a stuck bridge made a failing command take ~50 seconds to report.** The page
+retried a failed call 5 times, even when the failure was the bridge being
+stuck/restarted/unavailable (HTTP 503), where retrying cannot help. Those failures
+are now tagged non-retryable, so the toast appears immediately. *(app.js)*
+
+**A3 — the UI kept saying "Connected" after the device or bridge went away.**
+The only disconnect handling was the WebHID `disconnect` event, deliberately skipped
+on the Windows-bridge path. A single `handleDeviceLost()` now resets the UI, stops
+battery polling and releases the handle. It runs from the WebHID event and from a
+failed command, but only after `/api/hid/status` confirms the device is really gone
+or the bridge lost its handle — a sleeping wireless mouse, where the dongle is
+still present, is not treated as disconnected. Commands queued before the loss bail
+out instead of running against a null device. *(app.js)*
+
+**A4 — battery polling toasted an error every 60 seconds once the device was gone.**
+Background polls are now silent on failure; they still feed the device-lost check,
+and polling stops when the device is lost. *(app.js)*
+
+## Input handling
+
+**B1 — empty or non-numeric fields were sent to the mouse as 0.** `parseInt('')`
+is `NaN`, which passed through `Math.min/Math.max` unchanged and became `0` in the
+report (DPI 0, idle 0, and so on). A strict `readIntField()` now throws on
+empty/non-numeric input and clamps valid numbers; every Apply handler reads and
+validates all of its fields before sending the first command, so a bad stage-4
+value can't leave DPI already applied. *(app.js)*
+
+**B2 — an unrecognised polling-rate value silently became 1000 Hz.** Apply now uses
+an explicit `POLL_CODES` map and throws on anything else. *(app.js)*
+
+**B3 — a bad profile import could half-apply.** Fields were assigned one by one, so
+a malformed file could change some inputs and then fail. Profiles are now fully
+validated first (numbers and ranges, five stages, option values, `#rrggbb` colours)
+and nothing is touched unless every field passes. `stages`, `activeStage`,
+`chargeEffect` and `chargeColor` stay optional so older profiles still load. Load
+and import toasts now say which field was wrong. *(app.js)*
+
+## Security
+
+**C1 — no `Host`/`Origin` check (DNS rebinding).** The session token only stops
+cross-origin pages from reading `index.html` — a rebound hostname makes the
+attacker's page same-origin, so it could read the token. The server now rejects any
+request, static files included, whose `Host` isn't `localhost:<port>` or
+`127.0.0.1:<port>`, or whose `Origin` (when present) isn't one of the same two.
+Reaching the app through a LAN IP or another hostname no longer works; it never
+did, since the server binds to `127.0.0.1`. *(server.js)*
+
+## Interface
+
+**D1 — the title had no styling.** `index.html` used `<div class="logo">`, which no
+CSS targeted, while the stylesheet styled `h1`. The header is now an `h1` (which
+also gives the page a proper heading), and the unused `.beta` selector is gone.
+*(index.html, styles.css)*
+
+**D2 — profiles didn't remember the active DPI stage.** `activeStage` is now saved,
+exported, validated and restored. Loading it marks the stage "unsaved — click
+Apply", like clicking a badge. *(app.js)*
+
+**D3 — a failed multi-step Apply only named the failing step.** Apply handlers now
+run through a shared `runSteps()` helper; if earlier steps succeeded, the toast
+says "Partly applied. Done: …. Stopped at: …." *(app.js)*
+
+## Code hygiene
+
+**E1 — lighting `dataSize` was inferred from the argument array's length.** The
+values were correct, but fragile. Each effect now declares its own size, and an
+unknown effect throws instead of being silently skipped. The byte layouts are
+unchanged. *(app.js)*
+
+## Reviewed, deliberately not changed
+
+- **`pwsh.exe` requirement.** It works as documented. A fallback to Windows
+  PowerShell 5.1 might work (no C# newer than version 5 was found in the embedded
+  source) but is untested, so it was left alone.
+- **Brightness readback.** It reads the Logo LED only, while the slider can apply to
+  several zones. Reading both would add a HID round trip to every refresh, so it was
+  skipped.
+
+## Still needs a physical Naga V2 Pro
+
+Everything under "What still can't be fixed from source" in the first pass below
+still applies. In addition, none of this pass's changes have been run against real
+hardware: in particular the device-lost detection (unplug, sleep, bridge restart)
+and the 10-second bridge timeout should be tried with an actual mouse.
+
+---
+
+# First fix pass
 
 Every item below traces back to a numbered issue from the technical review and its
 source-verification pass. Each entry says what was wrong, what changed, and which

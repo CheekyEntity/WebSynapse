@@ -9,13 +9,12 @@
 <body>
     <div class="container">
         <header>
-            <div class="logo">WebSynapse <span class="badge">BETA</span></div>
+            <h1>WebSynapse <span class="badge">BETA</span></h1>
             <p>Driverless control for your Razer Naga V2 Pro</p>
         </header>
 
         <section class="connect-panel">
             <h2 id="connection-status">Waiting for device...</h2>
-            <!-- Fix (item 7): no firmware-version detection existed anywhere. -->
             <p id="firmware-info" style="margin-top: 6px; font-size: 0.85rem; color: var(--text-secondary);"></p>
             <div class="button-group" style="display: flex; gap: 10px; justify-content: center; margin-top: 20px;">
                 <button id="connect-btn" class="primary-btn">Connect Mouse</button>
@@ -23,10 +22,8 @@
             </div>
             
             <div id="profile-section" style="display: none; margin-top: 20px;">
-                <!-- Fix (item 15): these were unlabeled "Save"/"Load" buttons next
-                     to a Profile dropdown, which reads as an onboard hardware
-                     profile switcher. Clarified that it's browser storage only —
-                     nothing is written to the mouse until you press Apply. -->
+                <!-- Profiles live in browser storage only; nothing is written to
+                     the mouse until you press Apply. -->
                 <div style="display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap;">
                     <label style="color: var(--text-secondary);">Profile (saved in this browser, not on the mouse):</label>
                     <select id="profile-select">
@@ -121,10 +118,8 @@
                         <input type="range" id="idle-slider" min="1" max="15" step="1" value="5">
                         <input type="number" id="idle-input" min="1" max="15" step="1" value="5">
                     </div>
-                    <!-- Fix (issue 1.11): charge_effect/charge_colour only exist on the
-                         wireless variant in OpenRazer's driver (registered under the
-                         WIRELESS case before falling through to shared wired attrs).
-                         Row gets an id so app.js can hide it on a wired connection. -->
+                    <!-- Charge effect/colour only exist on the wireless variant in
+                         OpenRazer's driver; app.js hides this row on a wired connection. -->
                     <div class="setting-row" id="charge-effect-row">
                         <label>Charging LED Effect</label>
                         <select id="charge-effect-select">
@@ -148,11 +143,6 @@
                 <div class="control-body">
                     <div class="setting-row">
                         <label>Lighting Zone</label>
-                        <!-- Fix (item 3): "Scroll Wheel" previously sent a command
-                             OpenRazer's own driver never registers for this device.
-                             Replaced with "Main / Thumbgrid", which matches the LED
-                             id OpenRazer's matrix_brightness/matrix_effect_* calls
-                             actually use here. -->
                         <select id="light-zone-select">
                             <option value="all">All Zones</option>
                             <option value="logo">Logo LED</option>

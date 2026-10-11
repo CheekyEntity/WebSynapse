@@ -44,9 +44,8 @@ namespace WebSynapseNative
         private const int ERROR_NO_MORE_ITEMS = 259;
         private const int HIDP_STATUS_SUCCESS = 0x00110000;
         private const ushort RAZER_VENDOR_ID = 0x1532;
-        // Fix (issue 1.1): these were swapped relative to OpenRazer's device
-        // header and relative to app.js's own PRODUCT_IDS mapping. 0x00A7 is
-        // the wired PID, 0x00A8 is the wireless/HyperSpeed-receiver PID.
+        // 0x00A7 is the wired PID, 0x00A8 is the wireless/HyperSpeed-receiver PID
+        // (matches OpenRazer's device header and app.js's PRODUCT_IDS mapping).
         private const ushort NAGA_V2_PRO_WIRED = 0x00A7;
         private const ushort NAGA_V2_PRO_WIRELESS = 0x00A8;
         private static readonly IntPtr InvalidHandle = new IntPtr(-1);
@@ -157,10 +156,8 @@ namespace WebSynapseNative
                     return Failure("No writable Naga V2 Pro HID feature interface was found. Confirm the mouse is connected by cable.");
                 }
 
-                // Fix (issue 6): previously opened the single statically-chosen
-                // candidate and trusted it unconditionally. Now tries each
-                // candidate in priority order and only commits to one that
-                // passes a real SET+GET probe (ProbeDevice), closing the
+                // Tries each candidate in priority order and only commits to one
+                // that passes a real SET+GET probe (ProbeDevice), closing the
                 // handle and moving on if it doesn't.
                 List<string> attemptErrors = new List<string>();
                 foreach (DeviceInfo candidate in candidates)
@@ -205,23 +202,20 @@ namespace WebSynapseNative
             }
         }
 
-        // Fix (issue 1.2): status byte values a Razer feature-report response
-        // carries at payload offset 0. Confirmed exactly against
-        // razercommon.h's RAZER_CMD_* defines.
+        // Status byte values a Razer feature-report response carries at payload
+        // offset 0 (matches razercommon.h's RAZER_CMD_* defines).
         private const byte RAZER_STATUS_BUSY = 0x01;
         private const byte RAZER_STATUS_SUCCESSFUL = 0x02;
         private const byte RAZER_STATUS_FAILURE = 0x03;
         private const byte RAZER_STATUS_TIMEOUT = 0x04;
         private const byte RAZER_STATUS_NOT_SUPPORTED = 0x05;
 
-        // Fix (follow-up after getting razermouse_driver.h): the Naga V2 Pro is
-        // one of the devices OpenRazer routes through
+        // The Naga V2 Pro is routed through OpenRazer's
         // RAZER_NEW_MOUSE_RECEIVER_WAIT_US (31000us = 31ms) rather than the
-        // default RAZER_MOUSE_WAIT_US (600us) -- confirmed from the header,
-        // where a guessed ~10ms delay was used before. This is the wait
-        // between sending a command and reading its response, applied on
-        // every attempt. RAZER_RETRY_BACKOFF_MS mirrors razer_send_payload's
-        // separate fsleep(10000) between retries of the whole transaction.
+        // default RAZER_MOUSE_WAIT_US (600us). This is the wait between sending
+        // a command and reading its response, applied on every attempt.
+        // RAZER_RETRY_BACKOFF_MS mirrors razer_send_payload's separate
+        // fsleep(10000) between retries of the whole transaction.
         private const int RAZER_RESPONSE_WAIT_MS = 31;
         private const int RAZER_RETRY_BACKOFF_MS = 10;
         private const int SET_FEATURE_MAX_RETRIES = 5;
@@ -254,16 +248,12 @@ namespace WebSynapseNative
                 byte sentClass = payload.Length > 6 ? payload[6] : (byte)0;
                 byte sentId = payload.Length > 7 ? payload[7] : (byte)0;
 
-                // Fix (issue 1.2, refined): previously returned Ok=true immediately
-                // after the Windows API call succeeded, without ever checking
-                // whether the mouse actually accepted the command. Now mirrors
-                // OpenRazer's razer_send_payload/razer_get_report pair: each
-                // attempt RESENDS the SET (not just re-reads a stale buffer),
-                // waits RAZER_RESPONSE_WAIT_MS for the device to prepare its
-                // response, then reads it back and checks the status byte and
-                // the echoed command class/id. The reference retries on every
-                // non-success status (not just BUSY) before giving up, so this
-                // does the same, reporting whatever status was last seen.
+                // Mirrors OpenRazer's razer_send_payload/razer_get_report pair:
+                // each attempt RESENDS the SET, waits RAZER_RESPONSE_WAIT_MS for
+                // the device to prepare its response, then reads it back and
+                // checks the status byte and the echoed command class/id. The
+                // reference retries on every non-success status (not just BUSY)
+                // before giving up, so this does the same.
                 string lastError = null;
                 bool sawAnyStatus = false;
                 for (int attempt = 0; attempt < SET_FEATURE_MAX_RETRIES; attempt++)
@@ -304,9 +294,9 @@ namespace WebSynapseNative
 
                     if (echoedClass != sentClass || echoedId != sentId)
                     {
-                        // Another transaction's response landed in between (the queue
-                        // serialization added for issue 1.9 should make this rare, but
-                        // this is the defence-in-depth check for when it still happens).
+                        // Another transaction's response landed in between (the
+                        // queue serialization in app.js should make this rare;
+                        // this is the defence-in-depth check).
                         lastError = "The device's response did not match the command that was sent.";
                         continue;
                     }
@@ -316,10 +306,6 @@ namespace WebSynapseNative
                         return new BridgeResult { Ok = true };
                     }
 
-                    // Any other recognised status is still worth retrying -- the
-                    // reference driver does the same for busy/failure/timeout/
-                    // not-supported, only reporting a specific error once every
-                    // attempt has been exhausted.
                     sawAnyStatus = true;
                     lastError = DescribeStatus(status);
                 }
@@ -370,7 +356,7 @@ namespace WebSynapseNative
         /// <summary>
         /// Issues a single HidD_GetFeature call and strips the Windows report-ID
         /// byte, returning the raw 90-byte Razer payload. Shared by GetFeature()
-        /// and by SetFeature()'s post-write verification (issue 1.2).
+        /// and by SetFeature()'s post-write verification.
         /// Caller must hold Sync.
         /// </summary>
         private static byte[] ReadFeaturePayload()
@@ -391,9 +377,8 @@ namespace WebSynapseNative
             return report;
         }
 
-        // Fix (issue 6): took an explicit feature-report length parameter
-        // instead of always reading activeDevice, so the connect-time probe
-        // below can use it before any device has been committed to.
+        // Takes an explicit feature-report length so the connect-time probe can
+        // use it before any device has been committed to.
         private static byte[] MakeFeatureBuffer(byte[] payload, int featureReportLength)
         {
             if (payload.Length == featureReportLength)
@@ -409,14 +394,9 @@ namespace WebSynapseNative
             return null;
         }
 
-        // Fix (issue 6): previously returned a single statically-chosen
-        // device (filtered by feature-report length, preferring
-        // UsagePage==0x01/Usage==0x02) and Connect() committed to it without
-        // ever verifying it actually behaves like a Razer command interface.
-        // Now returns every plausible candidate in priority order, and
-        // Connect() below live-probes each one in turn with a real
-        // SET+GET round trip, the same standard the WebHID path already
-        // uses in app.js (issue 5).
+        // Returns every plausible candidate in priority order; Connect()
+        // live-probes each one in turn with a real SET+GET round trip, the same
+        // standard the WebHID path uses in app.js.
         private static List<DeviceInfo> OrderCandidateDevices(List<DeviceInfo> devices)
         {
             List<DeviceInfo> preferred = new List<DeviceInfo>();
@@ -440,10 +420,9 @@ namespace WebSynapseNative
             return preferred;
         }
 
-        // Fix (issue 6): builds the same "get polling rate" probe report
-        // app.js uses to validate a WebHID interface, so both connection
-        // paths apply the identical live-protocol check rather than trusting
-        // static HID descriptor metadata alone.
+        // Builds the same "get polling rate" probe report app.js uses to
+        // validate a WebHID interface, so both connection paths apply the
+        // identical live-protocol check.
         private static byte[] BuildProbeReport()
         {
             byte[] report = new byte[90];
@@ -659,8 +638,12 @@ Add-Type -TypeDefinition $nativeSource -ErrorAction Stop
 
 while (($line = [Console]::In.ReadLine()) -ne $null) {
     $response = $null
+    # Remember the request id outside the try so an error response can carry it;
+    # otherwise server.js never matches the reply to its pending request.
+    $requestId = $null
     try {
         $request = $line | ConvertFrom-Json -ErrorAction Stop
+        $requestId = $request.id
         switch ([string]$request.command) {
             'status' { $result = [WebSynapseNative.HidBridge]::Status() }
             'connect' { $result = [WebSynapseNative.HidBridge]::Connect() }
@@ -670,7 +653,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
             default { throw "Unknown native bridge command: $($request.command)" }
         }
         $response = [ordered]@{
-            id = $request.id
+            id = $requestId
             ok = [bool]$result.Ok
             error = $result.Error
             device = $result.Device
@@ -679,7 +662,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         }
     } catch {
         $response = [ordered]@{
-            id = $null
+            id = $requestId
             ok = $false
             error = $_.Exception.Message
         }

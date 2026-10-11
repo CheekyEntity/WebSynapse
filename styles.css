@@ -58,7 +58,7 @@ h1 {
     gap: 12px;
 }
 
-.beta, .badge {
+.badge {
     font-size: 0.7rem;
     background: var(--razer-green);
     color: #000;
@@ -379,7 +379,7 @@ button {
     color: var(--text-secondary);
     border: 2px solid var(--border-color);
     transition: var(--transition);
-    /* Fix (issue 1.3): badges are now clickable to choose the active stage. */
+    /* Badges are clickable to choose the active stage. */
     cursor: pointer;
 }
 
@@ -397,4 +397,3 @@ button {
 .status-disconnected {
     color: #ff8c00 !important;
 }
-

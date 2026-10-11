@@ -3,17 +3,16 @@
 // ============================================================
 
 const VENDOR_ID = 0x1532;
-// Fix (issue 1.1): A7/A8 were previously reversed in places, and app.js and
-// native-bridge.ps1 disagreed with each other on which PID is which. Per
-// OpenRazer's device header and the openrazer-daemon USB_PID constants:
-//   0x00A7 = Naga V2 Pro WIRED
-//   0x00A8 = Naga V2 Pro WIRELESS (stock HyperSpeed receiver)
+// 0x00A7 = Naga V2 Pro WIRED, 0x00A8 = Naga V2 Pro WIRELESS (HyperSpeed receiver)
 const WIRED_PID = 0x00A7;
 const WIRELESS_PID = 0x00A8;
 const PRODUCT_IDS = new Set([WIRED_PID, WIRELESS_PID]);
 const MOUSE_USAGE_PAGE = 0x01;
 const MOUSE_USAGE = 0x02;
 const VARSTORE = 0x01;
+
+// Polling-rate value -> device code. Used for both Apply and profile validation.
+const POLL_CODES = { '125': 0x08, '500': 0x02, '1000': 0x01 };
 
 let mouseDevice = null;
 
@@ -31,25 +30,24 @@ const dpiSlider = document.getElementById('dpi-slider');
 const dpiInput = document.getElementById('dpi-input');
 const pollSelect = document.getElementById('poll-rate-select');
 
-// Fix (issue 1.3, write side): there was previously no way to actually
-// choose which DPI stage is "active" — the Apply handler hardcoded
-// active=0 regardless of what the device (or the user) wanted. This is
-// the in-memory selection, 1-based to match the device's own numbering;
-// refreshValues() updates it from the mouse, and clicking a badge updates
-// it locally (sent to the device on the next "Apply Performance Settings").
+// In-memory active DPI stage (1-based, matches the device). refreshValues()
+// updates it from the mouse; clicking a badge or loading a profile updates it
+// locally and it is sent on the next "Apply Performance Settings".
 let selectedActiveStage = 1;
+
+function setSelectedStage(n, unsaved = true) {
+    selectedActiveStage = n;
+    for (let i = 1; i <= 5; i++) {
+        const b = document.getElementById(`stage-badge-${i}`);
+        if (b) b.classList.toggle('active-stage', i === n);
+    }
+    document.getElementById('active-stage-label').innerText =
+        `Active: Stage ${n}` + (unsaved ? ' (unsaved — click Apply)' : '');
+}
 
 [1, 2, 3, 4, 5].forEach(n => {
     const badge = document.getElementById(`stage-badge-${n}`);
-    if (!badge) return;
-    badge.addEventListener('click', () => {
-        selectedActiveStage = n;
-        for (let i = 1; i <= 5; i++) {
-            const b = document.getElementById(`stage-badge-${i}`);
-            if (b) b.classList.toggle('active-stage', i === n);
-        }
-        document.getElementById('active-stage-label').innerText = `Active: Stage ${n} (unsaved — click Apply)`;
-    });
+    if (badge) badge.addEventListener('click', () => setSelectedStage(n));
 });
 
 // Power
@@ -112,6 +110,20 @@ function hexToRgb(hex) {
     ];
 }
 
+/**
+ * Strict numeric reader for form fields. Throws on empty / non-numeric input
+ * (instead of letting NaN become 0 in a report), and clamps valid numbers
+ * into [min, max].
+ */
+function readIntField(el, min, max, label) {
+    const raw = String(el.value).trim();
+    const n = Number(raw);
+    if (raw === '' || !Number.isFinite(n)) {
+        throw new Error(`${label} must be a number.`);
+    }
+    return Math.min(Math.max(Math.round(n), min), max);
+}
+
 /** Toast notification system — replaces ugly alert() calls */
 function showToast(msg, isError = false) {
     const container = document.getElementById('toast-container');
@@ -135,16 +147,7 @@ function flashSuccess(btn) {
 
 /**
  * Builds the 90-byte Uint8Array for a Razer feature report.
- *
- * Fix (issue 1.4): the old `class===0x0F ? 0x1F : 0xFF` rule was wrong for
- * this device far more broadly than just matrix/lighting commands. Checked
- * every Naga V2 Pro command OpenRazer defines across classes 0x00 (poll
- * rate/device mode), 0x03 (charge effect/colour), 0x04 (DPI/DPI stages),
- * 0x07 (battery/idle/low-threshold), and 0x0F (lighting) — this device uses
- * transaction_id 0x1F for essentially everything, not just class 0x0F.
- * (The one documented exception in OpenRazer, the legacy
- * razer_chroma_standard_matrix_effect_none() path, uses a different command
- * entirely that WebSynapse never sends, so it doesn't apply here.)
+ * This device uses transaction_id 0x1F for essentially every command.
  */
 function buildRazerReport(commandClass, commandId, dataSize, args = []) {
     const report = new Uint8Array(90);
@@ -166,25 +169,7 @@ function buildRazerReport(commandClass, commandId, dataSize, args = []) {
 }
 
 // ============================================================
-// Fix (issues 1.6, 1.7, 1.8, 1.9): a single serialized, verified
-// transaction helper used by every HID read and write.
-//
-// Previously every call site built its own report, fired
-// sendFeatureReport, waited a fixed sleep(50) with nothing else
-// synchronizing request/response, and (for writes) never looked at what
-// came back at all. That meant: no check of the device's status byte
-// (1.6/1.7), a blind timeout standing in for real request/response
-// matching (1.8), and no protection against two HID transactions
-// interleaving — e.g. the 60s battery poll firing mid-way through a
-// user's "Apply" click (1.9).
-//
-// This replaces that pattern everywhere: every HID operation is now a
-// send+receive pair that goes through one serialized queue (so only one
-// transaction is ever in flight), checks the device's status byte against
-// Razer's documented response codes, confirms the response actually
-// echoes the command class/id we sent (catching any response that still
-// slipped through out of order), and retries a bounded number of times on
-// a transient/busy result rather than trusting a single fixed delay.
+// Serialized, verified HID transactions
 // ============================================================
 
 const RAZER_STATUS = { BUSY: 0x01, SUCCESSFUL: 0x02, FAILURE: 0x03, TIMEOUT: 0x04, NOT_SUPPORTED: 0x05 };
@@ -200,8 +185,7 @@ function describeRazerStatus(status) {
 }
 
 // Every HID transaction passes through this single promise chain so two
-// transactions can never be in flight on the same feature-report channel
-// at once (issue 1.9).
+// transactions can never be in flight on the same feature-report channel.
 let hidQueue = Promise.resolve();
 
 function serialized(task) {
@@ -210,32 +194,27 @@ function serialized(task) {
     return result;
 }
 
-/**
- * Builds and sends a Razer feature report, then reads back and validates
- * the response (status byte + echoed class/id), retrying on a BUSY or
- * malformed response up to `retries` times. Returns the validated 90-byte
- * response as a Uint8Array, or null if the device never confirmed — in
- * which case a toast has already been shown, so callers can just bail out.
- *
- * @param {boolean} opts.expectResponse - if false, a BUSY/unreadable retry
- *   still happens, but a successful status byte alone is sufficient (used
- *   for pure "set" commands some callers don't otherwise need data from).
- */
-// Fix (follow-up after getting razermouse_driver.h): the Naga V2 Pro is
-// routed through OpenRazer's RAZER_NEW_MOUSE_RECEIVER_WAIT_US (31000us =
-// 31ms), not the default RAZER_MOUSE_WAIT_US (600us) — confirmed from the
-// header; a guessed ~30ms wait was used before. RAZER_RETRY_BACKOFF_MS
-// mirrors razer_send_payload's separate fsleep(10000) between retries of
-// the whole transaction (distinct from the per-attempt response wait).
+// OpenRazer routes the Naga V2 Pro through RAZER_NEW_MOUSE_RECEIVER_WAIT_US
+// (31ms) between a command and its response; RAZER_RETRY_BACKOFF_MS mirrors
+// razer_send_payload's fsleep(10000) between whole-transaction retries.
 const RAZER_RESPONSE_WAIT_MS = 31;
 const RAZER_RETRY_BACKOFF_MS = 10;
 
+/**
+ * Sends a Razer feature report, reads back and validates the response
+ * (status byte + echoed class/id), retrying up to `retries` times.
+ * Returns the validated 90-byte response, or null if the device never
+ * confirmed. On final failure it first checks whether the device is gone
+ * (and if so runs handleDeviceLost), otherwise shows a toast unless
+ * `quiet` is set.
+ */
 function sendRazerCommand(commandClass, commandId, dataSize, args = [], opts = {}) {
-    const { retries = 5, context = 'Command' } = opts;
+    const { retries = 5, context = 'Command', quiet = false } = opts;
     if (!mouseDevice) return Promise.resolve(null);
     const report = buildRazerReport(commandClass, commandId, dataSize, args);
 
     return serialized(async () => {
+        if (!mouseDevice) return null; // device was lost while this was queued
         let lastReason = 'no response was received';
         for (let attempt = 0; attempt < retries; attempt++) {
             if (attempt > 0) await sleep(RAZER_RETRY_BACKOFF_MS);
@@ -258,20 +237,40 @@ function sendRazerCommand(commandClass, commandId, dataSize, args = [], opts = {
                 }
                 if (status === RAZER_STATUS.SUCCESSFUL) return r;
 
-                // Fix: previously treated failure/timeout/not-supported as an
-                // immediate hard stop. OpenRazer's own razer_send_payload
-                // retries on *every* non-successful status (not just BUSY),
-                // only reporting a specific error once every attempt is
-                // exhausted — matched here.
+                // OpenRazer retries on every non-successful status.
                 lastReason = describeRazerStatus(status);
             } catch (e) {
                 lastReason = e.message || String(e);
+                if (e.nonRetryable) break; // bridge stuck/restarted: retrying can't help
             }
         }
         console.error(`${context} gave up after ${retries} attempts: ${lastReason}`);
-        showToast(`${context} failed: ${lastReason}`, true);
+        if (!(await deviceStillPresent())) {
+            handleDeviceLost(`Lost connection to the mouse (${context.toLowerCase()} failed). Click Reconnect when ready.`);
+            return null;
+        }
+        if (!quiet) showToast(`${context} failed: ${lastReason}`, true);
         return null;
     });
+}
+
+/**
+ * Runs HID steps in order and stops at the first failure. A failed step has
+ * already toasted its own reason; if earlier steps succeeded, say so.
+ */
+async function runSteps(steps) {
+    const done = [];
+    for (const s of steps) {
+        const r = await sendRazerCommand(s.cls, s.id, s.size, s.args, { context: `Set ${s.label}` });
+        if (!r) {
+            if (done.length > 0 && mouseDevice) {
+                showToast(`Partly applied. Done: ${done.join(', ')}. Stopped at: ${s.label}.`, true);
+            }
+            return false;
+        }
+        done.push(s.label);
+    }
+    return true;
 }
 
 // ============================================================
@@ -321,10 +320,7 @@ function base64ToBytes(value) {
 }
 
 async function nativeBridgeRequest(path, body) {
-    // Fix (issue 9): every request now carries the per-session token the
-    // server injected into this page on load, so a request from some other
-    // origin/tab (which has no way to read window.__WEBSYNAPSE_TOKEN__)
-    // gets rejected by the server before it reaches the HID bridge.
+    // Every request carries the per-session token the server injected into this page.
     const authHeaders = { 'X-WebSynapse-Token': window.__WEBSYNAPSE_TOKEN__ || '' };
     let response;
     try {
@@ -350,17 +346,14 @@ async function nativeBridgeRequest(path, body) {
     if (!response.ok && !result) {
         throw new Error(`The local Windows HID bridge returned HTTP ${response.status}.`);
     }
-    return result || { ok: false, error: 'The local Windows HID bridge returned no data.' };
+    const parsed = result || { ok: false, error: 'The local Windows HID bridge returned no data.' };
+    parsed.httpStatus = response.status;
+    return parsed;
 }
 
 function createNativeDevice(device) {
     const nativeDevice = {
         productName: device?.ProductName || 'Razer Naga V2 Pro',
-        // Fix (issue 1.11 prerequisite): the WebHID path already exposes
-        // productId on the native HIDDevice object; the native-bridge path
-        // didn't surface it at all, which made PID-based gating impossible
-        // regardless of connection method. Mirror it here so both paths
-        // expose the same shape.
         productId: device?.ProductId,
         opened: true,
         async sendFeatureReport(reportId, data) {
@@ -368,12 +361,21 @@ function createNativeDevice(device) {
             const result = await nativeBridgeRequest('/api/hid/set', {
                 report: bytesToBase64(new Uint8Array(data))
             });
-            if (!result.ok) throw new Error(result.error || 'Windows rejected the Razer feature report.');
+            if (!result.ok) {
+                const err = new Error(result.error || 'Windows rejected the Razer feature report.');
+                // 503 = bridge stuck, restarted or unavailable; retrying won't help.
+                err.nonRetryable = result.httpStatus === 503;
+                throw err;
+            }
         },
         async receiveFeatureReport(reportId) {
             if (reportId !== 0) throw new Error('The Naga command interface only returns feature report 0.');
             const result = await nativeBridgeRequest('/api/hid/get', {});
-            if (!result.ok) throw new Error(result.error || 'Windows could not read the Razer feature report.');
+            if (!result.ok) {
+                const err = new Error(result.error || 'Windows could not read the Razer feature report.');
+                err.nonRetryable = result.httpStatus === 503;
+                throw err;
+            }
             return new DataView(base64ToBytes(result.data).buffer);
         },
         async close() {
@@ -391,10 +393,41 @@ async function closeDevice(device) {
     }
 }
 
-// Fix (issue 1.11): charging LED effect/colour are wireless-only commands
-// (OpenRazer only registers charge_effect/charge_colour sysfs files for the
-// WIRELESS PID). Previously WebSynapse sent these unconditionally on both
-// variants. Gate both the UI and the actual command on the connected PID.
+// ------------------------------------------------------------
+// Device-lost handling (shared by the WebHID event and command failures)
+// ------------------------------------------------------------
+
+function handleDeviceLost(message) {
+    if (!mouseDevice) return;            // idempotent: only the first caller acts
+    const lost = mouseDevice;
+    mouseDevice = null;                  // queued tasks see this and bail out
+    if (window._battInterval) { clearInterval(window._battInterval); window._battInterval = null; }
+    closeDevice(lost);                   // best effort, deliberately not awaited
+
+    statusText.innerText = 'Mouse disconnected!';
+    statusText.className = 'status-disconnected';
+    document.getElementById('firmware-info').innerText = '';
+    controlsPanel.style.display = 'none';
+    connectBtn.style.display = 'block';
+    reconnectBtn.style.display = 'block';
+    showToast(message, true);
+}
+
+// A failed command alone isn't proof the mouse is gone (e.g. a sleeping
+// wireless mouse is rejected too), so confirm via the bridge's status endpoint.
+async function deviceStillPresent() {
+    if (!mouseDevice) return false;
+    if (!usingNativeBridge) return mouseDevice.opened !== false;
+    try {
+        const s = await nativeBridgeRequest('/api/hid/status');
+        const count = Array.isArray(s.devices) ? s.devices.length : (s.devices ? 1 : 0);
+        return !!(s.ok && s.device && count > 0);
+    } catch {
+        return false;                    // bridge unreachable or stuck
+    }
+}
+
+// Charging LED effect/colour are wireless-only commands in OpenRazer.
 function isWirelessConnected() {
     return !!mouseDevice && mouseDevice.productId === WIRELESS_PID;
 }
@@ -405,12 +438,10 @@ function updateChargingControlsVisibility() {
     if (!wireless) {
         chargeColorRow.style.display = 'none';
     } else {
-        // Restore normal effect-driven visibility for the colour row.
         chargeEffectSelect.dispatchEvent(new Event('change'));
     }
 }
 
-// Fix (item 7): no firmware-version detection existed anywhere in the app.
 // Command 0x00/0x81 per OpenRazer's razer_chroma_standard_get_firmware_version.
 async function fetchFirmwareVersion() {
     const r = await sendRazerCommand(0x00, 0x81, 0x02, [0x00, 0x00], { context: 'Get firmware version' });
@@ -488,12 +519,8 @@ async function connectToDevice(devices) {
             const probeReport = buildRazerReport(0x00, 0x85, 0x01, [0x00]);
             await dev.sendFeatureReport(0x00, probeReport);
 
-            // Fix (issue 5): previously committed to the first interface that
-            // merely accepted the write, without ever checking whether it
-            // actually answered like a real Razer command interface. A
-            // feature-report write can succeed on the wrong HID collection
-            // and still go nowhere, so read back and require a response that
-            // echoes this exact command's class/id before trusting it.
+            // Read back and require a response echoing this command's class/id
+            // before trusting the interface.
             await sleep(RAZER_RESPONSE_WAIT_MS);
             const resp = await dev.receiveFeatureReport(0x00);
             const r = resp && resp.buffer ? new Uint8Array(resp.buffer) : null;
@@ -560,21 +587,13 @@ reconnectBtn.addEventListener('click', async () => {
 if (navigator.hid) {
     navigator.hid.addEventListener('disconnect', (event) => {
         if (!usingNativeBridge && mouseDevice && event.device === mouseDevice) {
-            mouseDevice = null;
-            if (window._battInterval) clearInterval(window._battInterval);
-            statusText.innerText = 'Mouse disconnected!';
-            statusText.className = 'status-disconnected';
-            document.getElementById('firmware-info').innerText = '';
-            controlsPanel.style.display = 'none';
-            connectBtn.style.display = 'block';
-            reconnectBtn.style.display = 'block';
-            showToast('Mouse disconnected — click Reconnect when ready', true);
+            handleDeviceLost('Mouse disconnected. Click Reconnect when ready.');
         }
     });
 }
 
 // ============================================================
-// Auto Battery Polling (every 60s)
+// Auto Battery Polling (every 60s, silent on failure)
 // ============================================================
 
 function startBatteryPolling() {
@@ -582,18 +601,13 @@ function startBatteryPolling() {
     window._battInterval = setInterval(async () => {
         if (!mouseDevice) return;
         try {
-            await fetchBattery();
+            await fetchBattery({ quiet: true });
         } catch (e) { /* silently ignore */ }
     }, 60000);
 }
 
-async function fetchBattery() {
-    // Fix (issues 1.6/1.7): previously parsed r[9] from whatever came back
-    // with no check that the device actually succeeded or that the
-    // response was even for this request. Now goes through
-    // sendRazerCommand, which validates the status byte and the
-    // echoed class/id before we trust any of the returned bytes.
-    const r = await sendRazerCommand(0x07, 0x80, 0x02, [0x00, 0x00], { context: 'Get battery level' });
+async function fetchBattery(opts = {}) {
+    const r = await sendRazerCommand(0x07, 0x80, 0x02, [0x00, 0x00], { context: 'Get battery level', ...opts });
     if (!r) return;
     const level = Math.round((r[9] / 255) * 100);
     batteryLevelEl.innerText = `${level}%`;
@@ -603,17 +617,13 @@ async function fetchBattery() {
 }
 
 // ============================================================
-// Refresh All Values (robust — each section in its own try/catch)
+// Refresh All Values (each section in its own try/catch)
 // ============================================================
 
 async function refreshValues() {
     if (!mouseDevice) return;
 
     // 1. GET DPI
-    // Fix (issues 1.6/1.7): every block below now goes through
-    // sendRazerCommand, which checks the device's status byte and the
-    // echoed command class/id before any bytes are trusted, instead of
-    // parsing whatever came back unconditionally.
     try {
         const r = await sendRazerCommand(0x04, 0x85, 0x07, [VARSTORE, 0,0,0,0,0,0], { context: 'Get DPI' });
         if (r) {
@@ -624,16 +634,10 @@ async function refreshValues() {
         }
     } catch (e) { console.error('GET DPI failed:', e); }
 
-    // 1b. GET DPI Stages
+    // 1b. GET DPI Stages (active stage is 1-based)
     try {
         const r = await sendRazerCommand(0x04, 0x86, 0x26, [VARSTORE], { context: 'Get DPI stages' });
         if (r) {
-            // Fix (issue 1.3, read side): OpenRazer documents this field as
-            // 1-based ("02" in the response literally means "stage 2 is
-            // active"), but this used to compare it directly against a
-            // 0-based loop index and then add 1 again when displaying it —
-            // an off-by-one that highlighted the wrong badge and showed
-            // the wrong stage number.
             const activeStage = r[9]; // arg[1] = active stage, 1-based
             const count = r[10];      // arg[2] = number of stages
             selectedActiveStage = activeStage >= 1 ? activeStage : 1;
@@ -656,9 +660,6 @@ async function refreshValues() {
         const r = await sendRazerCommand(0x00, 0x85, 0x01, [0x00], { context: 'Get polling rate' });
         if (r) {
             const code = r[8];
-            // Fix (issue 1.5): an unrecognised code used to silently display
-            // "1000 Hz" as if that were a confirmed reading. Now shows the
-            // raw code instead of asserting a value we don't actually know.
             const knownRates = { 0x01: 1000, 0x02: 500, 0x08: 125 };
             const pr = knownRates[code];
             if (pr !== undefined) {
@@ -730,38 +731,28 @@ refreshBtn.addEventListener('click', refreshValues);
 
 applyPerfBtn.addEventListener('click', async () => {
     if (!mouseDevice) return;
-
     try {
-        // SET DPI
-        // Fix (issues 1.6/1.9): goes through sendRazerCommand now, so a
-        // rejected/timed-out SET is caught (and surfaced via toast) instead
-        // of being silently treated as applied, and can't interleave with
-        // a concurrent battery poll.
-        const dpi = Math.min(Math.max(parseInt(dpiInput.value), 100), 30000);
+        // Read and validate every field before sending anything.
+        const dpi = readIntField(dpiInput, 100, 30000, 'DPI');
         const dH = (dpi >> 8) & 0xFF, dL = dpi & 0xFF;
-        if (!(await sendRazerCommand(0x04, 0x05, 0x07, [VARSTORE, dH, dL, dH, dL, 0, 0], { context: 'Set DPI' }))) return;
 
-        // SET DPI Stages (5 stages)
-        // Fix (issue 1.3, write side): the active-stage argument used to be
-        // hardcoded to 0, discarding whatever the user picked (and OpenRazer
-        // explicitly rejects an active stage < 1). Uses the badge selection
-        // from selectedActiveStage instead, clamped into the valid [1, 5]
-        // range the device expects.
         const activeStage = Math.min(Math.max(selectedActiveStage, 1), 5);
         const stageArgs = [VARSTORE, activeStage, 0x05]; // varstore, active stage (1-based), count=5
         for (let i = 1; i <= 5; i++) {
-            let s = Math.min(Math.max(parseInt(document.getElementById(`dpi-stage-${i}`).value), 100), 30000);
-            stageArgs.push(i - 1); // stage index into the array below is 0-based (matches OpenRazer's write loop)
-            stageArgs.push((s >> 8) & 0xFF, s & 0xFF); // X
-            stageArgs.push((s >> 8) & 0xFF, s & 0xFF); // Y
-            stageArgs.push(0x00, 0x00); // reserved
+            const s = readIntField(document.getElementById(`dpi-stage-${i}`), 100, 30000, `DPI stage ${i}`);
+            stageArgs.push(i - 1, (s >> 8) & 0xFF, s & 0xFF, (s >> 8) & 0xFF, s & 0xFF, 0x00, 0x00);
         }
-        if (!(await sendRazerCommand(0x04, 0x06, 0x26, stageArgs, { context: 'Set DPI stages' }))) return;
 
-        // SET Polling Rate
         const prStr = pollSelect.value;
-        const prCode = prStr === '125' ? 0x08 : prStr === '500' ? 0x02 : 0x01;
-        if (!(await sendRazerCommand(0x00, 0x05, 0x01, [prCode], { context: 'Set polling rate' }))) return;
+        const prCode = POLL_CODES[prStr];
+        if (prCode === undefined) throw new Error('Unknown polling rate selected.');
+
+        const ok = await runSteps([
+            { label: 'DPI',          cls: 0x04, id: 0x05, size: 0x07, args: [VARSTORE, dH, dL, dH, dL, 0, 0] },
+            { label: 'DPI stages',   cls: 0x04, id: 0x06, size: 0x26, args: stageArgs },
+            { label: 'polling rate', cls: 0x00, id: 0x05, size: 0x01, args: [prCode] }
+        ]);
+        if (!ok) return;
 
         document.getElementById('current-dpi').innerText = `${dpi} DPI`;
         document.getElementById('current-poll').innerText = `${prStr} Hz`;
@@ -775,42 +766,33 @@ applyPerfBtn.addEventListener('click', async () => {
 });
 
 // ============================================================
-// Apply: Power (Low Battery Threshold + Idle Time)
+// Apply: Power (Low Battery Threshold + Idle Time + Charge LED)
 // ============================================================
 
 applyPowerBtn.addEventListener('click', async () => {
     if (!mouseDevice) return;
-
     try {
-        // SET Low Battery Threshold
-        let pct = Math.min(Math.max(parseInt(lowBattInput.value), 5), 25);
-        const raw = Math.round(pct * 2.55);
-        if (!(await sendRazerCommand(0x07, 0x01, 0x01, [raw], { context: 'Set low-battery threshold' }))) return;
-
-        // SET Idle Time
-        let mins = Math.min(Math.max(parseInt(idleInput.value), 1), 15);
+        const pct  = readIntField(lowBattInput, 5, 25, 'Low-battery threshold');
+        const mins = readIntField(idleInput, 1, 15, 'Idle time');
         const secs = mins * 60;
-        if (!(await sendRazerCommand(0x07, 0x03, 0x02, [(secs >> 8) & 0xFF, secs & 0xFF], { context: 'Set idle time' }))) return;
 
-        // Fix (issue 1.11): charge_effect/charge_colour are wireless-only in
-        // OpenRazer's driver for this device — skip entirely on a wired
-        // connection rather than sending commands the mouse doesn't support.
+        const steps = [
+            { label: 'low-battery threshold', cls: 0x07, id: 0x01, size: 0x01, args: [Math.round(pct * 2.55)] },
+            { label: 'idle time',             cls: 0x07, id: 0x03, size: 0x02, args: [(secs >> 8) & 0xFF, secs & 0xFF] }
+        ];
+
+        // Charge effect/colour are wireless-only; skip entirely on a wired connection.
         if (isWirelessConnected()) {
-            // SET Charge Effect (0x03, 0x10, 0x01) — 0x00=default, 0x01=static
             const chargeType = parseInt(chargeEffectSelect.value);
-            if (!(await sendRazerCommand(0x03, 0x10, 0x01, [chargeType], { context: 'Set charge effect' }))) return;
-
-            // SET Charge Colour if static mode (uses standard LED RGB: class 0x03, cmd 0x01)
-            // Fix (issue 1.10): this previously sent 0x04 labeled "BATTERY_LED" —
-            // 0x04 is actually LOGO_LED. OpenRazer's charge-colour function uses
-            // the BATTERY_LED constant, confirmed exactly as 0x03 against
-            // razercommon.h. NOSTORE = 0x00.
+            steps.push({ label: 'charge effect', cls: 0x03, id: 0x10, size: 0x01, args: [chargeType] });
             if (chargeType === 1) {
                 const [cr, cg, cb] = hexToRgb(chargeColorPicker.value);
                 const BATTERY_LED = 0x03;
-                if (!(await sendRazerCommand(0x03, 0x01, 0x05, [0x00, BATTERY_LED, cr, cg, cb], { context: 'Set charge colour' }))) return;
+                steps.push({ label: 'charge colour', cls: 0x03, id: 0x01, size: 0x05, args: [0x00, BATTERY_LED, cr, cg, cb] });
             }
         }
+
+        if (!(await runSteps(steps))) return;
 
         document.getElementById('current-low-batt').innerText = `${pct}%`;
         document.getElementById('current-idle').innerText = `${mins} Min`;
@@ -829,55 +811,35 @@ applyPowerBtn.addEventListener('click', async () => {
 applyLightBtn.addEventListener('click', async () => {
     if (!mouseDevice) return;
 
+    const ZERO_LED = 0x00, LOGO_LED = 0x04;
     const zone = lightZoneSelect.value;
-    // Fix (item 3): "Scroll Wheel" (previously LED id 0x01) was never
-    // actually backed by OpenRazer for this device — its probe() function
-    // registers zero scroll_matrix_effect_* files for the Naga V2 Pro,
-    // unlike e.g. the Lancehead where that mechanism is real. Replaced with
-    // "Main / Thumbgrid" (ZERO_LED), which IS what OpenRazer's own
-    // matrix_brightness/matrix_effect_* calls use for this exact device
-    // (razer_chroma_extended_matrix_brightness(VARSTORE, ZERO_LED, ...)).
-    // ZERO_LED=0x00 and LOGO_LED=0x04 are both confirmed exactly against
-    // razercommon.h's LED id defines.
-    const ZERO_LED = 0x00;
-    const LOGO_LED = 0x04;
-    const zones = zone === 'all' ? [LOGO_LED, ZERO_LED] :
-                  zone === 'main' ? [ZERO_LED] : [LOGO_LED];
-
-    const brightness = parseInt(brightInput.value);
-    const bRaw = Math.round((brightness / 100) * 255);
-    const effect = lightEffectSelect.value;
-    const [r, g, b] = hexToRgb(lightColorPicker.value);
+    const leds = zone === 'all'  ? [{ id: LOGO_LED, name: 'Logo' }, { id: ZERO_LED, name: 'Main' }]
+               : zone === 'main' ? [{ id: ZERO_LED, name: 'Main' }]
+               :                   [{ id: LOGO_LED, name: 'Logo' }];
 
     try {
-        for (const led of zones) {
-            // Brightness
-            // Fix (issues 1.6/1.9): goes through sendRazerCommand so a
-            // rejected brightness/effect write is caught instead of assumed
-            // successful, and can't interleave with battery polling.
-            if (!(await sendRazerCommand(0x0F, 0x04, 0x03, [VARSTORE, led, bRaw], { context: 'Set brightness' }))) return;
+        const brightness = readIntField(brightInput, 0, 100, 'Brightness');
+        const bRaw = Math.round((brightness / 100) * 255);
+        const [r, g, b] = hexToRgb(lightColorPicker.value);
 
-            // Effect
-            let effectArgs;
-            switch (effect) {
-                case 'none':
-                    effectArgs = [VARSTORE, led, 0x00, 0,0,0]; break;
-                case 'static':
-                    effectArgs = [VARSTORE, led, 0x01, 0,0, 0x01, r,g,b]; break;
-                case 'breathing':
-                    effectArgs = [VARSTORE, led, 0x02, 0x01,0, 0x01, r,g,b]; break;
-                case 'spectrum':
-                    effectArgs = [VARSTORE, led, 0x03, 0,0,0]; break;
-                case 'reactive':
-                    effectArgs = [VARSTORE, led, 0x05, 0, 0x03, 0x01, r,g,b]; break;
-                case 'wave':
-                    effectArgs = [VARSTORE, led, 0x04, 0x01, 0x28, 0]; break;
-            }
-            if (effectArgs) {
-                const dataSize = effectArgs.length === 9 ? 0x09 : 0x06;
-                if (!(await sendRazerCommand(0x0F, 0x02, dataSize, effectArgs, { context: 'Set lighting effect' }))) return;
-            }
+        const effectFor = led => ({
+            none:      { size: 0x06, args: [VARSTORE, led, 0x00, 0, 0, 0] },
+            static:    { size: 0x09, args: [VARSTORE, led, 0x01, 0, 0, 0x01, r, g, b] },
+            breathing: { size: 0x09, args: [VARSTORE, led, 0x02, 0x01, 0, 0x01, r, g, b] },
+            spectrum:  { size: 0x06, args: [VARSTORE, led, 0x03, 0, 0, 0] },
+            reactive:  { size: 0x09, args: [VARSTORE, led, 0x05, 0, 0x03, 0x01, r, g, b] },
+            wave:      { size: 0x06, args: [VARSTORE, led, 0x04, 0x01, 0x28, 0] }
+        })[lightEffectSelect.value];
+
+        const steps = [];
+        for (const led of leds) {
+            const fx = effectFor(led.id);
+            if (!fx) throw new Error('Unknown lighting effect selected.');
+            steps.push({ label: `${led.name} brightness`, cls: 0x0F, id: 0x04, size: 0x03, args: [VARSTORE, led.id, bRaw] });
+            steps.push({ label: `${led.name} effect`,     cls: 0x0F, id: 0x02, size: fx.size, args: fx.args });
         }
+
+        if (!(await runSteps(steps))) return;
 
         document.getElementById('current-bright').innerText = `${brightness}%`;
         flashSuccess(applyLightBtn);
@@ -896,6 +858,7 @@ function gatherProfileData() {
     return {
         dpi: dpiInput.value,
         stages: [1,2,3,4,5].map(i => document.getElementById(`dpi-stage-${i}`).value),
+        activeStage: selectedActiveStage,
         poll: pollSelect.value,
         lowBatt: lowBattInput.value,
         idle: idleInput.value,
@@ -908,7 +871,51 @@ function gatherProfileData() {
     };
 }
 
-function applyProfileData(data) {
+/** Validates a whole profile up front; throws before anything is touched. */
+function validateProfileData(data) {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        throw new Error('Profile must be a JSON object.');
+    }
+    const num = (v, min, max, label) => {
+        const raw = String(v ?? '').trim();
+        const n = Number(raw);
+        if (raw === '' || !Number.isFinite(n)) throw new Error(`${label} must be a number.`);
+        return Math.min(Math.max(Math.round(n), min), max);
+    };
+    const option = (select, v, label) => {
+        if (!Array.from(select.options).some(o => o.value === String(v))) {
+            throw new Error(`${label} has an unknown value.`);
+        }
+        return String(v);
+    };
+    const color = (v, label) => {
+        if (typeof v !== 'string' || !/^#[0-9a-f]{6}$/i.test(v)) throw new Error(`${label} must be a #rrggbb colour.`);
+        return v;
+    };
+
+    const out = {
+        dpi: num(data.dpi, 100, 30000, 'DPI'),
+        poll: option(pollSelect, data.poll, 'Polling rate'),
+        lowBatt: num(data.lowBatt, 5, 25, 'Low-battery threshold'),
+        idle: num(data.idle, 1, 15, 'Idle time'),
+        zone: option(lightZoneSelect, data.zone, 'Lighting zone'),
+        bright: num(data.bright, 0, 100, 'Brightness'),
+        effect: option(lightEffectSelect, data.effect, 'Lighting effect'),
+        color: color(data.color, 'Lighting colour')
+    };
+    if (data.stages !== undefined) {
+        if (!Array.isArray(data.stages) || data.stages.length !== 5) throw new Error('DPI stages must be a list of 5 values.');
+        out.stages = data.stages.map((v, i) => num(v, 100, 30000, `DPI stage ${i + 1}`));
+    }
+    if (data.activeStage !== undefined) out.activeStage = num(data.activeStage, 1, 5, 'Active stage');
+    if (data.chargeEffect !== undefined) out.chargeEffect = option(chargeEffectSelect, data.chargeEffect, 'Charge effect');
+    if (data.chargeColor !== undefined) out.chargeColor = color(data.chargeColor, 'Charge colour');
+    return out;
+}
+
+function applyProfileData(raw) {
+    const data = validateProfileData(raw); // throws before anything is touched
+
     dpiInput.value = data.dpi; dpiSlider.value = data.dpi;
     if (data.stages) {
         data.stages.forEach((v, i) => {
@@ -916,6 +923,7 @@ function applyProfileData(data) {
             if (el) el.value = v;
         });
     }
+    if (data.activeStage !== undefined) setSelectedStage(data.activeStage);
     pollSelect.value = data.poll;
     lowBattInput.value = data.lowBatt; lowBattSlider.value = data.lowBatt;
     idleInput.value = data.idle; idleSlider.value = data.idle;
@@ -943,7 +951,7 @@ document.getElementById('load-profile-btn').addEventListener('click', () => {
         applyProfileData(JSON.parse(raw));
         showToast(`Loaded "${name}". Click Apply to send to mouse.`);
     } catch (e) {
-        showToast('Error loading profile', true);
+        showToast(`Error loading profile: ${e.message}`, true);
     }
 });
 
@@ -979,10 +987,10 @@ importFileInput.addEventListener('change', (e) => {
         try {
             const data = JSON.parse(evt.target.result);
             applyProfileData(data);
-            const name = data._profileName || 'imported';
+            const name = (data && data._profileName) || 'imported';
             showToast(`Imported "${name}". Click Apply to send to mouse.`);
         } catch (err) {
-            showToast('Invalid profile file', true);
+            showToast(`Invalid profile file: ${err.message}`, true);
         }
     };
     reader.readAsText(file);
